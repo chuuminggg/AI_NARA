@@ -1,0 +1,10 @@
+# 대회 배포 자료(원문·라벨·법령 패키지)는 재배포하지 않는다
+open/
+[[]Baseline[]]*.ipynb
+
+# 산출물
+*.zip
+output/
+cache/
+__pycache__/
+*.pyc
