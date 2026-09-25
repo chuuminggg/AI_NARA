@@ -27,9 +27,10 @@ def main():
     ap.add_argument("--labels", default=os.path.join(ROOT, "open", "dev_labels.csv"))
     ap.add_argument("--no-gates", action="store_true")
     ap.add_argument("--gates-only", action="store_true")
+    ap.add_argument("--script", default=None, help="채점에 쓸 script.py (기본 submit/script.py)")
     a = ap.parse_args()
 
-    s = load_script()
+    s = load_script(a.script) if a.script else load_script()
     labels = {r["id"]: r for r in csv.DictReader(open(a.labels, encoding="utf-8"))}
     recs = {r["id"]: r for r in s.iter_records(a.input)}
 
