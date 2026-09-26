@@ -12,6 +12,7 @@
   T4 잡음 모델: 정답 + 무작위 오탐(셀당 10%, 근거는 원문 문장) → 게이트·근거 부정 규칙의 효과
   T5 잘린 출력: max_tokens에 걸려 JSON이 중간에 끊긴 응답 → 행이 어떻게 나오는지
   T6 시간 가드: 가짜 시계로 축소·생략 경로를 실행해 CSV가 유효한지
+  T7 재현율 50% 모델: 정답 양성의 절반을 놓치는 가상 모델 → 규칙이 놓친 양성을 되살리는지
 T3·T4는 라벨로 만든 가상 모델이다. 실제 Gemma 점수가 아니다.
 """
 import csv
@@ -57,6 +58,8 @@ def replay(s, recs, outputs):
         final = s.postprocess(parsed, rec)
         if hasattr(s, "catalog_rules"):                     # script의 run()과 같은 순서
             final = s.catalog_rules(final, rec, catalog)
+        if hasattr(s, "qualification_rules"):
+            final = s.qualification_rules(final, rec)
         if hasattr(s, "apply_gates"):
             final = s.apply_gates(final, rec)
         preds[rid] = {v: final[v]["위반여부"] for v in ITEMS}
@@ -145,6 +148,20 @@ def main():
             else:
                 cells[v] = (0, None)
         noisy[i] = as_json(cells)
+    # T7: 재현율 50% 모델 — 정답 양성의 절반을 놓치고 음성 셀의 5%를 오탐(근거는 원문 문장)
+    rng7 = random.Random(1)
+    half = {}
+    for i, rec in recs.items():
+        sents = sentences(rec) or [""]
+        cells = {}
+        for v in ITEMS:
+            if labels[i][v] == "1":
+                cells[v] = (1, labels[i]["e" + v[1:]] or None) if rng7.random() < 0.5 else (0, None)
+            elif rng7.random() < 0.05:
+                cells[v] = (1, rng7.choice(sents))
+            else:
+                cells[v] = (0, None)
+        half[i] = as_json(cells)
 
     results = {}
     for name in names:
@@ -160,6 +177,9 @@ def main():
         m, f = macro(replay(s, recs, noisy), labels)
         r["T4 잡음 모델 Macro"] = round(m, 4)
         r["T4 항목 F1"] = {v: round(x, 3) for v, x in f.items()}
+        m, f7 = macro(replay(s, recs, half), labels)
+        r["T7 재현율 50% 모델 Macro"] = round(m, 4)
+        r["T7 항목 F1"] = {v: round(x, 3) for v, x in f7.items()}
         miss, hits = t5_truncated(s, next(iter(recs.values())))
         r["T5 잘린 출력: 결손 항목/남은 위반"] = f"{miss}/24, {hits}"
         r["T6 가드(2000s/청크): 검증·축소·생략"] = t6_guard(path, 2000)
@@ -169,12 +189,13 @@ def main():
     for name, r in results.items():
         print(f"\n## {name}")
         for k, v in r.items():
-            if k != "T4 항목 F1":
+            if k not in ("T4 항목 F1", "T7 항목 F1"):
                 print(f"  {k}: {v}")
     if len(names) == 2:
-        a, b = (results[n]["T4 항목 F1"] for n in names)
-        diff = {v: (a[v], b[v]) for v in ITEMS if a[v] != b[v]}
-        print(f"\n## T4 항목별 차이 ({names[0]} → {names[1]}): {diff or '없음'}")
+        for t in ("T4", "T7"):
+            a, b = (results[n][f"{t} 항목 F1"] for n in names)
+            diff = {v: (a[v], b[v]) for v in ITEMS if a[v] != b[v]}
+            print(f"\n## {t} 항목별 차이 ({names[0]} → {names[1]}): {diff or '없음'}")
 
 
 if __name__ == "__main__":

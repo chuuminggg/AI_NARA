@@ -480,6 +480,103 @@ def catalog_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any],
     return out
 
 
+# ----- 참가자격 문구 규칙 (v4·v7·v8, 0→1만) -----
+# v8 실적+지역 중복 제한, v7 지역제한을 서로 다른 광역 둘 이상으로 확대(허용 금액 미만일 때),
+# v4 실적을 특정 기관 발주·납품으로 한정. 배점표·서식·제출서류 문맥은 제외합니다.
+# dev 규칙 단독: v8 5/0/1, v7 7/0/0, v4 6/1/0 · 무라벨 발화율은 dev 대비 0.52·0.84·0.29배.
+QUAL_RULES = True
+QR_PERF = re.compile(r"실적(?:을|이)?\s*(?:보유|있는|갖춘|충족)|(?:이상|초과)(?:인|의)?\s*실적|실적\s*증명서?\s*(?:보유|소지|제출)"
+                  r"|수행\s*실적|준공\s*금?액[^\n]{0,40}이상|납품\s*실적")
+QR_REGION = re.compile(r"본점\s*소재지|주된\s*영업소|소재지를\s*[^\n]{0,60}(?:두고|둔)|관내에\s*(?:있는|소재)"
+                    r"|에\s*소재한\s*(?:업체|자)|지역\s*제한|(?:에|내에)\s*소재(?:한|하고|하는)")
+QR_NOT_Q = re.compile(r"배점|평가\s*항목|평가표|정량\s*평가|정성\s*평가|가점|심사\s*기준|평가\s*기준|제안서\s*평가|서식|별지|제출\s*서류|증빙\s*서류")
+QR_Q_HEAD = re.compile(r"참가\s*자격|자격\s*요건")
+QR_WIDE = (r"[가-힣]{2}특별자치도|[가-힣]{2}특별자치시|[가-힣]{2,3}광역시|서울특별시|경기도|강원도|충청북도|충청남도"
+        r"|전라북도|전라남도|경상북도|경상남도|제주도")
+QR_QQ = r"[\s\"'“”‘’]*"
+QR_REGION_PAIR = re.compile(r"(" + QR_WIDE + r")" + QR_QQ + r"[^\n]{0,60}?(?:또는|,|·|및)" + QR_QQ + r"(" + QR_WIDE + r")")
+QR_REGION_ANCHOR = re.compile(r"본점\s*소재지|주된\s*영업소|소재지를\s*[^\n]{0,80}(?:두고|둔)|관할\s*구역\s*안에|지역\s*제한|소재지가")
+QR_INST = (r"국가기관|공공기관|정부투자기관|지방자치단체|지자체|공기업|준정부기관|정부기관|교육청|고등학교|대학교"
+        r"|대학병원|종합병원|국공립|초등학교|중학교")
+QR_ORD = r"발주|시행|납품|공급|체결|수주"
+QR_INST_ORD = re.compile(r"(?:" + QR_INST + r")[^\n]{0,12}?(?:이|가|에서|에게|에|,)?\s*(?:" + QR_ORD + r")(?:한|된|하는|하여)[^\n]{0,80}?실적")
+QR_INST_NEAR = re.compile(r"(?:" + QR_INST + r")[^\n]{0,60}?실적")
+QR_PRIVATE = re.compile(r"민간|일반\s*기업|기업체\s*포함|개인\s*포함")
+QR_TAIL = re.compile(r"업체이어야|업체여야|업체만|자격이\s*있|있는\s*업체|보유한\s*업체|있어야\s*합니다|자로\s*제한|하여야\s*합니다|참가\s*자격")
+
+
+def qr_in_qual(text, *positions, lookback=40):
+    for pos in positions:
+        a = text.rfind("\n", 0, pos) + 1
+        b = text.find("\n", pos)
+        if QR_NOT_Q.search(text[a: b if b != -1 else len(text)]):
+            return False
+        for line in reversed(text[:a].split("\n")[-lookback:]):
+            if QR_Q_HEAD.search(line):
+                break
+            if QR_NOT_Q.search(line):
+                return False
+    return True
+
+
+def qr_quote(text, s, e, cap=480):
+    return text[max(0, s - 40): min(len(text), e + 60)][:cap].strip()
+
+
+def qr_v8(rec, window=800):
+    for d in rec["docs"]:
+        t = d["text"]
+        perf = [m.span() for m in QR_PERF.finditer(t)]
+        reg = [m.span() for m in QR_REGION.finditer(t)]
+        pairs = sorted(((abs(p[0] - r[0]), p, r) for p in perf for r in reg if abs(p[0] - r[0]) <= window))
+        for _, p, r in pairs:
+            if qr_in_qual(t, p[0], r[0]):
+                return qr_quote(t, min(p[0], r[0]), max(p[1], r[1]))
+    return None
+
+
+def qr_v7(rec, allowed):
+    if not allowed:
+        return None
+    for d in rec["docs"]:
+        t = d["text"]
+        for a in QR_REGION_ANCHOR.finditer(t):
+            s0 = max(0, a.start() - 150)
+            seg = t[s0: a.end() + 200]
+            for m in QR_REGION_PAIR.finditer(seg):
+                if m.group(1) != m.group(2):
+                    return qr_quote(t, s0 + m.start(), s0 + m.end())
+    return None
+
+
+def qr_v4(rec):
+    for d in rec["docs"]:
+        t = d["text"]
+        for pat, tail in ((QR_INST_ORD, False), (QR_INST_NEAR, True)):
+            for m in pat.finditer(t):
+                around = t[max(0, m.start() - 300): m.end() + 300]
+                if QR_PRIVATE.search(around) or not qr_in_qual(t, m.start()):
+                    continue
+                if tail and not QR_TAIL.search(t[m.end(): m.end() + 60]):
+                    continue
+                return qr_quote(t, m.start(), m.end())
+    return None
+
+
+def qualification_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    if not QUAL_RULES:
+        return judgment
+    m = rec.get("meta") or {}
+    price = parse_amount(m)
+    limit = LOCAL_REGION_LIMIT if "지방" in str(m.get("적용계약법") or "") else GOSI_AMOUNT
+    found = {"v8": qr_v8(rec), "v7": qr_v7(rec, price is None or price < limit), "v4": qr_v4(rec)}
+    out = dict(judgment)
+    for v, q in found.items():
+        if q and out[v]["위반여부"] != 1:
+            out[v] = {"위반여부": 1, "근거문구": q}
+    return out
+
+
 def restore_quote(quote: Optional[str], src: str) -> Optional[str]:
     """공백·줄바꿈만 다른 인용을 원문 표기로 되돌립니다. 못 찾으면 None. (8자 미만은 오일치 위험으로 제외)"""
     if not quote:
@@ -1061,7 +1158,7 @@ def run(input_path: str, out_path: str, runner_cls, limit: Optional[int], chunk:
             invalid += int(len(missing) == 24)
             filled += len(missing)
             before = sum(1 for v in ITEMS if parsed[v]["근거문구"] and parsed[v]["위반여부"] == 1 and v not in ABSENCE)
-            final = apply_gates(catalog_rules(apply_thresholds(postprocess(parsed, rec), pr), rec, catalog), rec)
+            final = apply_gates(qualification_rules(catalog_rules(apply_thresholds(postprocess(parsed, rec), pr), rec, catalog), rec), rec)
             kept = sum(1 for v in ITEMS if final[v]["근거문구"])
             ev_kept += kept
             ev_dropped += before - kept
