@@ -1157,6 +1157,9 @@ def parse_amount(meta: Dict[str, Any]) -> Optional[float]:
     return bud / 1.1 if bud is not None else None
 
 
+GATE_MODEL_HINT = re.compile(r"모델\s*명|제조사|제조\s*회사|상표|브랜드|[A-Za-z]{2,}[\s-]?\d{2,}|동등\s*(?:이상|품)")
+
+
 def gate_closed(rec: Dict[str, Any]) -> Dict[str, str]:
     """성립 불가 항목 → 사유. dev 200건에서 정답 양성을 막지 않는 것을 확인한 조건만 둡니다."""
     m = rec.get("meta") or {}
@@ -1168,6 +1171,11 @@ def gate_closed(rec: Dict[str, Any]) -> Dict[str, str]:
         closed["v23"] = "협상 계약 아님"
     if law and "지방" not in law:
         closed["v23"] = "지방계약법 아님"
+    # v9(특정 모델명 명시): 물품이 아니고, 규격서가 없고, 모델명·제조사·상표·영문+숫자 모델 표기도 없으면 성립 불가
+    # (dev 막힌 문서 35%, 막힌 정답 양성 0, 무라벨 52%)
+    if ("물품" not in str(m.get("업무구분") or "") and not any(d["type"] == "규격서" for d in rec["docs"])
+            and not GATE_MODEL_HINT.search(full_text(rec))):
+        closed["v9"] = "모델명 단서 없음"
     amt = parse_amount(m)
     if amt is not None:
         if amt < GOSI_AMOUNT * 0.9:                      # 고시금액 이상 항목
