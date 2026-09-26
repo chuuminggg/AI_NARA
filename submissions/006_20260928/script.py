@@ -673,8 +673,10 @@ def qualification_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any]
 # RULE_OVERRIDE_ITEMS: 규칙 결과로 모델 판정을 대체(규칙이 안 걸리면 0). 모델 오탐을 없애는 대신 규칙 재현율에 의존합니다.
 # 나머지 항목: 규칙이 걸리면 1로만 올립니다.
 # 근거: 베이스라인 모델은 일부 항목 오탐률이 매우 높고(공개 분석 v13·v17·v21 등), 규칙은 dev 정밀도가 높습니다.
-# 가상 모델(재현율 50%·오탐 15%, 3차 서버 0.21과 비슷한 수준) 시험: 올리기만 0.263 → 대체 0.445.
-RULE_OVERRIDE_ITEMS = {"v1", "v3", "v4", "v5", "v6", "v7", "v8", "v11", "v12", "v14", "v16", "v21"}
+# 대상 선정: 3차 서버 0.21과 비슷한 가상 모델(재현율 50%·오탐 15%, 게이트 적용)의 항목별 F1보다
+# 규칙 단독 dev F1이 높은 항목(17개). 나머지 7개(v9·v10·v15·v17·v20·v23·v24)는 모델 판정을 씁니다.
+RULE_OVERRIDE_ITEMS = {"v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v11", "v12", "v13", "v14",
+                       "v16", "v18", "v19", "v21", "v22"}
 
 
 # ----- 공고 본문 참가자격의 기업규모 규칙 (v14·v16) -----
@@ -729,13 +731,61 @@ def size_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any],
         out["v14"] = {"위반여부": 1, "근거문구": quote or ""}
     elif ONE_EOK <= price < GOSI_AMOUNT and kind == "none" and complete:
         out["v16"] = {"위반여부": 1, "근거문구": ""}
+    return out                                          # v15(소기업만) 규칙은 dev 2/5/4로 모델보다 못해 쓰지 않음
+
+
+def small_price_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """v18: 추정가격 1억 미만인데 본문 참가자격에 기업규모 제한이 없음(완전관측) (dev 6/24/1)."""
+    price = parse_amount(rec.get("meta") or {})
+    if price is None or price >= ONE_EOK:
+        return judgment
+    kind, _ = size_class(rec)
+    out = dict(judgment)
+    if kind == "none" and (rec.get("input_completeness") or {}).get("완전관측") is True:
+        out["v18"] = {"위반여부": 1, "근거문구": ""}
+    return out
+
+
+QR_SITE = re.compile(r"현장\s*설명회[^\n]{0,60}?(?:참석|참가)[^\n]{0,60}?(?:업체|자)[^\n]{0,30}?"
+                     r"(?:에\s*한하여|만|한함|자격|입찰\s*참가)")
+
+
+def misc_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any],
+               catalog: List[Dict[str, str]]) -> Dict[str, Dict[str, Any]]:
+    """v22: 협상계약에서 현장설명회 참석 업체로 참가 제한 (dev 1/0/4).
+    v13: 경쟁제품(직생 요구 품명이 고시 대상)인데 참가자격을 소기업·소상공인으로 한정, 소액수의 제외 (dev 2/3/4)."""
+    out = dict(judgment)
+    m = rec.get("meta") or {}
+    ft = full_text(rec)
+    if "협상" in str(m.get("낙찰방법") or ""):
+        sm = QR_SITE.search(ft)
+        if sm:
+            a = ft.rfind("\n", 0, sm.start()) + 1
+            b = ft.find("\n", sm.end())
+            out["v22"] = {"위반여부": 1, "근거문구": ft[a: b if b != -1 else len(ft)].strip()[:480]}
+    if "소액수의" not in str(m.get("낙찰방법") or ""):
+        _, codes = dp_demand(rec, catalog)
+        price = parse_amount(m)
+        by_code = {r.get("세부품명번호"): r for r in catalog}
+        comp = any(c in by_code and not (catalog_cap(by_code[c]) and price and price >= catalog_cap(by_code[c]))
+                   for c in codes)
+        if not comp:
+            for row in catalog_matches(rec, catalog):
+                cap = catalog_cap(row)
+                if not (cap and price and price >= cap):
+                    comp = True
+                    break
+        kind, quote = size_class(rec)
+        if comp and kind == "small":
+            out["v13"] = {"위반여부": 1, "근거문구": quote or ""}
     return out
 
 
 def apply_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any],
                 catalog: List[Dict[str, str]]) -> Dict[str, Dict[str, Any]]:
     zero = {v: {"위반여부": 0, "근거문구": ""} for v in ITEMS}
-    ruled = size_rules(qualification_rules(catalog_rules(zero, rec, catalog), rec), rec, catalog)
+    ruled = qualification_rules(catalog_rules(zero, rec, catalog), rec)
+    ruled = misc_rules(small_price_rules(size_rules(ruled, rec, catalog), rec), rec, catalog)
     out = {}
     for v in ITEMS:
         if v in RULE_OVERRIDE_ITEMS:
