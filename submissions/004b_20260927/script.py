@@ -565,6 +565,8 @@ def qr_v4(rec):
 
 QR_REGION_TOKEN = re.compile(r"\[지역:[^\]]*\]")
 QR_MONEY = re.compile(r"(?:(\d+(?:\.\d+)?)\s*억)?\s*(?:(\d+(?:\.\d+)?)\s*천\s*만)?\s*(?:([\d,]+)\s*만)?\s*(?:([\d,]{4,}))?\s*원")
+QR_V1 = re.compile(r"(고등교육법|산학협력단|대학(?:교)?|연구기관|협회\s*회원|정부출연)[^\n]{0,60}?"
+                   r"(?:만\s*(?:참여|참가|입찰)|에\s*한하여|으로\s*한정|로\s*한정|참여\s*가능)")
 QR_SHARE = re.compile(r"(?:지분|출자\s*비율|분담\s*비율)[^\n]{0,40}?(\d{1,2}(?:\.\d+)?)\s*%")
 
 
@@ -614,6 +616,14 @@ def qualification_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any]
                 line = t[a: b if b != -1 else len(t)]
                 if "이상" in line and any(v > price for v in qr_money(line)):
                     found["v3"] = line.strip()[:480]
+    # v1: 참가자격을 대학·산학협력단·연구기관·협회 회원 등 특정 기관으로 한정 (dev 2/0/5, 무라벨 0.23배)
+    for d in rec["docs"]:
+        t = d["text"]
+        for mm in QR_V1.finditer(t):
+            if "v1" not in found and qr_in_qual(t, mm.start()):
+                a = t.rfind("\n", 0, mm.start()) + 1
+                b = t.find("\n", mm.end())
+                found["v1"] = t[a: b if b != -1 else len(t)].strip()[:480]
     # v21: 공동수급 구성원 최소 지분율을 5% 미만으로 정함 (dev 4/0/2, 0.07배). 5%는 dev 라벨이 갈려 제외
     ft = full_text(rec)
     for mm in QR_SHARE.finditer(ft):
