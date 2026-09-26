@@ -56,10 +56,13 @@ def replay(s, recs, outputs):
     for rid, rec in recs.items():
         parsed, _ = s.parse_judgment(outputs[rid])
         final = s.postprocess(parsed, rec)
-        if hasattr(s, "catalog_rules"):                     # script의 run()과 같은 순서
-            final = s.catalog_rules(final, rec, catalog)
-        if hasattr(s, "qualification_rules"):
-            final = s.qualification_rules(final, rec)
+        if hasattr(s, "apply_rules"):                       # script의 run()과 같은 순서
+            final = s.apply_rules(final, rec, catalog)
+        else:
+            if hasattr(s, "catalog_rules"):
+                final = s.catalog_rules(final, rec, catalog)
+            if hasattr(s, "qualification_rules"):
+                final = s.qualification_rules(final, rec)
         if hasattr(s, "apply_gates"):
             final = s.apply_gates(final, rec)
         preds[rid] = {v: final[v]["위반여부"] for v in ITEMS}
