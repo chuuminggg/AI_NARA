@@ -564,6 +564,20 @@ def qr_v4(rec):
 
 
 QR_REGION_TOKEN = re.compile(r"\[지역:[^\]]*\]")
+QR_MONEY = re.compile(r"(?:(\d+(?:\.\d+)?)\s*억)?\s*(?:(\d+(?:\.\d+)?)\s*천\s*만)?\s*(?:([\d,]+)\s*만)?\s*(?:([\d,]{4,}))?\s*원")
+QR_SHARE = re.compile(r"(?:지분|출자\s*비율|분담\s*비율)[^\n]{0,40}?(\d{1,2}(?:\.\d+)?)\s*%")
+
+
+def qr_money(text: str) -> List[float]:
+    """'1억 5천만원', '455,000,000원' 같은 금액 표기를 원 단위로. 100만 원 미만은 버립니다."""
+    vals = []
+    for m in QR_MONEY.finditer(text):
+        a, b, c, d = m.groups()
+        v = ((float(a) * 1e8 if a else 0) + (float(b) * 1e7 if b else 0)
+             + (float(c.replace(",", "")) * 1e4 if c else 0) + (float(d.replace(",", "")) if d else 0))
+        if v >= 1e6:
+            vals.append(v)
+    return vals
 
 
 def qr_region_clauses(rec: Dict[str, Any]) -> List[str]:
@@ -588,6 +602,26 @@ def qualification_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any]
     found = {"v8": qr_v8(rec), "v7": qr_v7(rec, price is None or price < limit), "v4": qr_v4(rec)}
     # v5: 지역제한 허용 금액 이상인데 참가자격에 지역 제한 (dev 5/2/2, 무라벨 발화율 1.27배)
     # v6: 허용 금액 미만 지역제한을 시·군·구 단위(익명 토큰 '단위=기초')로 제한, 소액수의 제외 (dev 3/0/3, 0.24배)
+    # v3: 참가자격 실적 문구의 같은 줄에 추정가격을 넘는 금액 '이상' 요구 (dev 7/0/1, 무라벨 발화율 0.10배)
+    if price:
+        for d in rec["docs"]:
+            t = d["text"]
+            for mm in QR_PERF.finditer(t):
+                if "v3" in found or not qr_in_qual(t, mm.start()):
+                    continue
+                a = t.rfind("\n", 0, mm.start()) + 1
+                b = t.find("\n", mm.end())
+                line = t[a: b if b != -1 else len(t)]
+                if "이상" in line and any(v > price for v in qr_money(line)):
+                    found["v3"] = line.strip()[:480]
+    # v21: 공동수급 구성원 최소 지분율을 5% 미만으로 정함 (dev 4/0/2, 0.07배). 5%는 dev 라벨이 갈려 제외
+    ft = full_text(rec)
+    for mm in QR_SHARE.finditer(ft):
+        if float(mm.group(1)) < 5 and "공동" in ft[max(0, mm.start() - 200): mm.end()]:
+            a = ft.rfind("\n", 0, mm.start()) + 1
+            b = ft.find("\n", mm.end())
+            found["v21"] = ft[a: b if b != -1 else len(ft)].strip()[:480]
+            break
     clauses = qr_region_clauses(rec)
     if clauses and price is not None and price >= limit:
         found["v5"] = clauses[0]
