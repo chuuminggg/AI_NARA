@@ -293,6 +293,66 @@ def build_messages(rec: Dict[str, Any], system_prompt: str, max_chars: int) -> L
     ]
 
 
+# ===== 4-1. 항목 그룹별 질의 (GROUP_MODE) =====
+# 24항목을 한 번에 묻는 대신, 같은 문서를 공통 접두부로 두고 항목 그룹마다 질문을 뒤에 붙여 따로 묻습니다.
+# system과 문서 부분이 그룹 간에 같아 vLLM prefix caching으로 문서 prefill을 재사용합니다.
+GROUP_MODE = False
+ITEM_GROUPS = [
+    ["v1", "v2", "v3", "v4"],                 # 참가자격·실적
+    ["v5", "v6", "v7", "v8"],                 # 지역 제한
+    ["v9", "v10", "v11", "v12", "v13"],       # 모델명·경쟁제품·직접생산
+    ["v14", "v15", "v16", "v17", "v18"],      # 금액 구간별 기업규모 제한
+    ["v19", "v20", "v21", "v22", "v23", "v24"],  # 확약서·SW·공동계약·현장설명회·메타 대조
+]
+GROUP_SYSTEM = """당신은 공공 입찰공고의 법령 위반 여부를 점검한다.
+사용자가 준 나라장터 입력 메타와 문서를 읽고, 맨 끝 [판정할 항목]에 적힌 항목만 판정한다.
+
+지켜야 할 것
+1. 지정한 항목 전부에 답한다. 판단이 어려운 항목도 비워 두지 말고 0으로 낸다.
+2. 근거 문구는 반드시 **주어진 문서에 그대로 있는 문장**을 옮긴다. 요약하거나 고쳐 쓰지 않는다.
+   원문에 없는 문구는 근거로 인정되지 않는다. 500자를 넘기지 않는다.
+3. '근거 없음' 표시가 붙은 항목은 **있어야 할 문구가 없는 것**이 위반이다. 근거 문구를 null로 둔다.
+출력은 JSON 하나로만 낸다. 설명이나 머리말을 덧붙이지 않는다."""
+
+
+def group_question(tbl: Dict[str, Dict[str, Any]], group: List[str]) -> str:
+    lines = []
+    for v in group:
+        it = tbl[v]
+        tag = "  [근거 없음 — null]" if it["부재탐지"] else ""
+        note = f" ({it['비고']})" if it.get("비고") else ""
+        guide = f"\n    위반 기준: {ITEM_GUIDE[v]}" if v in ITEM_GUIDE else ""
+        lines.append(f"- {v}: {it['항목명']}{note}{tag}{guide}")
+    keys = ", ".join(group)
+    return ("\n[판정할 항목]\n" + "\n".join(lines) +
+            f"\n\n출력 키는 {keys}이고, 각 값은 {{\"위반여부\": 0 또는 1, \"근거문구\": 문자열 또는 null}}이다.")
+
+
+def build_group_messages(rec: Dict[str, Any], tbl: Dict[str, Dict[str, Any]], group: List[str],
+                         max_chars: int) -> List[Dict[str, str]]:
+    return [
+        {"role": "system", "content": GROUP_SYSTEM},
+        {"role": "user", "content": build_user_prompt(rec, max_chars) + group_question(tbl, group)},
+    ]
+
+
+def restrict_schema(schema: Dict[str, Any], group: List[str]) -> Dict[str, Any]:
+    """24항목 스키마에서 그룹 항목만 남긴 스키마."""
+    return {**schema, "required": [v for v in schema.get("required", ITEMS) if v in group],
+            "properties": {v: schema["properties"][v] for v in group}}
+
+
+def merge_group_outputs(texts: List[str], groups: List[List[str]]) -> str:
+    """그룹별 출력을 24항목 JSON 하나로 합칩니다. 그룹 밖 항목이 섞여 나와도 무시합니다."""
+    merged: Dict[str, Any] = {}
+    for text, group in zip(texts, groups):
+        parsed, missing = parse_judgment(text)
+        for v in group:
+            if v not in missing:
+                merged[v] = parsed[v]
+    return json.dumps(merged, ensure_ascii=False)
+
+
 # ===== 5. 모델 러너 (vLLM offline / mock) =====
 class VLLMRunner:
     """평가 서버의 모델을 vLLM offline API로 실행합니다."""
@@ -311,13 +371,24 @@ class VLLMRunner:
             kw["quantization"] = quant
         self.llm = LLM(**kw)
         self.tok = self.llm.get_tokenizer()
-        self.sp = SamplingParams(
-            temperature=0.0, max_tokens=max_tokens, seed=seed,
-            structured_outputs=StructuredOutputsParams(json=schema, disable_any_whitespace=True),
-            logprobs=5 if ITEM_THRESHOLDS else None,
-        )
+        def make_sp(sch):
+            return SamplingParams(
+                temperature=0.0, max_tokens=max_tokens, seed=seed,
+                structured_outputs=StructuredOutputsParams(json=sch, disable_any_whitespace=True),
+                logprobs=5 if ITEM_THRESHOLDS else None,
+            )
+        self._make_sp = make_sp
+        self._sp_cache: Dict[int, Any] = {}
+        self.sp = make_sp(schema)
         self.probs: Dict[int, Dict[str, float]] = {}   # id(messages) → 항목별 P(위반=1)
         self.load_seconds = time.time() - t0
+
+    def sampling_params(self, schema: Optional[Dict[str, Any]]):
+        if schema is None:
+            return self.sp
+        if id(schema) not in self._sp_cache:
+            self._sp_cache[id(schema)] = self._make_sp(schema)
+        return self._sp_cache[id(schema)]
 
     def count_tokens(self, messages: List[Dict[str, str]]) -> int:
         try:
@@ -328,8 +399,10 @@ class VLLMRunner:
         except Exception:
             return len(self.tok.encode("\n".join(m["content"] for m in messages)))
 
-    def chat(self, batch: List[List[Dict[str, str]]]) -> List[str]:
-        outs = self.llm.chat(batch, sampling_params=self.sp, use_tqdm=False)
+    def chat(self, batch: List[List[Dict[str, str]]], schemas: Optional[List[Dict[str, Any]]] = None) -> List[str]:
+        """schemas를 주면 요청마다 그 스키마로 제약 디코딩합니다(그룹 질의)."""
+        sp = self.sp if schemas is None else [self.sampling_params(s) for s in schemas]
+        outs = self.llm.chat(batch, sampling_params=sp, use_tqdm=False)
         if ITEM_THRESHOLDS:
             for m, o in zip(batch, outs):
                 self.probs[id(m)] = item_probs(o.outputs[0]) if o.outputs else {}
@@ -388,31 +461,32 @@ class MockRunner:
         out = {v: {"위반여부": 0, "근거문구": None} for v in ITEMS}
         return json.dumps(out, ensure_ascii=False)
 
-    def chat(self, batch: List[List[Dict[str, str]]]) -> List[str]:
+    def chat(self, batch: List[List[Dict[str, str]]], schemas: Optional[List[Dict[str, Any]]] = None) -> List[str]:
         return [self._one(m) for m in batch]
 
 
 def fit_to_budget(rec: Dict[str, Any], system_prompt: str, runner, max_chars: int,
-                  budget: int = PROMPT_BUDGET) -> Tuple[List[Dict[str, str]], int, int]:
-    """설정된 토큰 예산에 맞게 문서 글자 수를 조정합니다."""
+                  budget: int = PROMPT_BUDGET, builder=None) -> Tuple[List[Dict[str, str]], int, int]:
+    """설정된 토큰 예산에 맞게 문서 글자 수를 조정합니다. builder(max_chars)를 주면 그것으로 메시지를 만듭니다."""
     while True:
-        msgs = build_messages(rec, system_prompt, max_chars)
+        msgs = builder(max_chars) if builder else build_messages(rec, system_prompt, max_chars)
         n = runner.count_tokens(msgs)
         if n <= budget or max_chars <= 2000:
             return msgs, n, max_chars
         max_chars = int(max_chars * min(0.85, budget / n * 0.95))
 
 
-def run_chunk(runner, batch: List[List[Dict[str, str]]]) -> List[str]:
+def run_chunk(runner, batch: List[List[Dict[str, str]]],
+              schemas: Optional[List[Dict[str, Any]]] = None) -> List[str]:
     """배치 실패 시 건별로 재시도하고, 처리하지 못한 건은 빈 출력으로 반환합니다."""
     try:
-        return runner.chat(batch)
+        return runner.chat(batch, schemas) if schemas else runner.chat(batch)
     except Exception as e:
         log(f"  ! 청크({len(batch)}건) 실패 → 건 단위 재시도: {type(e).__name__}: {str(e)[:160]}")
     outs = []
-    for m in batch:
+    for k, m in enumerate(batch):
         try:
-            outs.append(runner.chat([m])[0])
+            outs.append((runner.chat([m], [schemas[k]]) if schemas else runner.chat([m]))[0])
         except Exception as e:
             log(f"  ! 건 단위 실패 → 빈 출력: {type(e).__name__}: {str(e)[:160]}")
             outs.append("")
@@ -661,8 +735,9 @@ def run(input_path: str, out_path: str, runner_cls, limit: Optional[int], chunk:
 
     tbl, schema = item_table(data_dir), decode_schema(data_dir)
     system_prompt = build_system_prompt(tbl)
+    group_schemas = [restrict_schema(schema, g) for g in ITEM_GROUPS]
     runner = runner_cls(schema, **runner_kw)
-    log(f"모델 로드 {runner.load_seconds:.1f}s")
+    log(f"모델 로드 {runner.load_seconds:.1f}s · GROUP_MODE={GROUP_MODE} · 임계값 {len(ITEM_THRESHOLDS)}개")
 
     # 청크 단위로 메시지를 만들고 추론합니다. 남은 시간이 부족하면 이후 청크의 문서 글자 수를 줄입니다.
     t_inf = time.time()
@@ -688,15 +763,38 @@ def run(input_path: str, out_path: str, runner_cls, limit: Optional[int], chunk:
             elif need > remain * 0.9 and cur_chars > MIN_CHARS:
                 cur_chars = max(MIN_CHARS, int(cur_chars * remain * 0.8 / need))
                 log(f"  ! 예상 {need:.0f}s > 남은 {remain:.0f}s → 문서 상한 {cur_chars:,}자로 축소")
-        batch = []
-        for rec in part:
-            m, n, mc = fit_to_budget(rec, system_prompt, runner, cur_chars)
-            batch.append(m)
-            ntok.append(n)
-            shrunk += int(mc < max_chars)
-        texts.extend(run_chunk(runner, batch))
-        rp = getattr(runner, "probs", {})
-        probs.extend(rp.pop(id(m), {}) for m in batch)
+        if GROUP_MODE:
+            # 공고마다 그룹 질의를 이어 붙여(공고 순서대로) 한 번에 보냅니다 — 같은 문서가 연달아 와서 prefix 캐시가 맞습니다.
+            longest = max(ITEM_GROUPS, key=lambda g: len(group_question(tbl, g)))
+            batch, sch, owner = [], [], []
+            for k, rec in enumerate(part):
+                _, n, mc = fit_to_budget(rec, system_prompt, runner, cur_chars,
+                                         builder=lambda c, r=rec: build_group_messages(r, tbl, longest, c))
+                ntok.append(n)
+                shrunk += int(mc < max_chars)
+                for gi, g in enumerate(ITEM_GROUPS):
+                    batch.append(build_group_messages(rec, tbl, g, mc))
+                    sch.append(group_schemas[gi])
+                    owner.append(k)
+            outs = run_chunk(runner, batch, sch)
+            rp = getattr(runner, "probs", {})
+            for k in range(len(part)):
+                idx = [j for j, o in enumerate(owner) if o == k]
+                texts.append(merge_group_outputs([outs[j] for j in idx], ITEM_GROUPS))
+                pk: Dict[str, float] = {}
+                for j in idx:
+                    pk.update(rp.pop(id(batch[j]), {}))
+                probs.append(pk)
+        else:
+            batch = []
+            for rec in part:
+                m, n, mc = fit_to_budget(rec, system_prompt, runner, cur_chars)
+                batch.append(m)
+                ntok.append(n)
+                shrunk += int(mc < max_chars)
+            texts.extend(run_chunk(runner, batch))
+            rp = getattr(runner, "probs", {})
+            probs.extend(rp.pop(id(m), {}) for m in batch)
         log(f"  {len(texts)}/{len(recs)}건 … {time.time() - t_inf:.0f}s (전체 {time.time() - T_START:.0f}s)")
     inf_seconds = time.time() - t_inf
     if ntok:

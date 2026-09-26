@@ -35,7 +35,7 @@ export PPS_MODEL_DIR=/workspace/models/gemma-4-26B-A4B-it PYTHONIOENCODING=utf-8
 run() { tag=$1; shift; echo "=== RUN $tag $(date)"; python tools/gpu_dev_run.py --tag "$tag" "$@" > /workspace/logs/dev_$tag.log 2>&1 || echo "RUN_FAILED $tag"; tail -n 1 /workspace/logs/dev_$tag.log; }
 run s003  --script submissions/003_20260926/script.py
 run s003g --script submit/script.py --set USE_ITEM_GUIDE=true
-run s002  --script submissions/002_20260926/script.py
+run s003grp --script submit/script.py --set GROUP_MODE=true
 echo ALL_DONE
 SH
 

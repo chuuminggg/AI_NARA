@@ -70,27 +70,52 @@ def main():
     if a.logprobs:
         runner.sp.logprobs = a.logprobs
     id0, id1 = (runner.tok.encode(d, add_special_tokens=False)[-1] for d in ("0", "1"))
-    msgs, ntok = [], []
-    for rec in recs:
-        m, n, _ = s.fit_to_budget(rec, system_prompt, runner, s.MAX_CHARS)
-        msgs.append(m)
+    group_mode = bool(getattr(s, "GROUP_MODE", False))
+    groups = s.ITEM_GROUPS if group_mode else [None]
+    gsch = [s.restrict_schema(schema, g) for g in s.ITEM_GROUPS] if group_mode else [None]
+    msgs, sps, owner, ntok = [], [], [], []
+    for k, rec in enumerate(recs):
+        if group_mode:
+            longest = max(s.ITEM_GROUPS, key=lambda g: len(s.group_question(tbl, g)))
+            _, n, mc = s.fit_to_budget(rec, system_prompt, runner, s.MAX_CHARS,
+                                       builder=lambda c, r=rec: s.build_group_messages(r, tbl, longest, c))
+            for gi, g in enumerate(s.ITEM_GROUPS):
+                msgs.append(s.build_group_messages(rec, tbl, g, mc))
+                sps.append(runner.sampling_params(gsch[gi]))
+                owner.append(k)
+        else:
+            m, n, _ = s.fit_to_budget(rec, system_prompt, runner, s.MAX_CHARS)
+            msgs.append(m)
+            sps.append(runner.sp)
+            owner.append(k)
         ntok.append(n)
+    if a.logprobs:
+        for sp in {id(x): x for x in sps}.values():
+            sp.logprobs = a.logprobs
     t_inf = time.time()
-    outs = runner.llm.chat(msgs, sampling_params=runner.sp, use_tqdm=True)
+    outs = runner.llm.chat(msgs, sampling_params=sps, use_tqdm=True)
     inf_s = time.time() - t_inf
 
     path = os.path.join(ROOT, "cache", "api", f"{a.tag}.jsonl")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     truncated = 0
     with open(path, "w", encoding="utf-8") as f:
-        for rec, m, o in zip(recs, msgs, outs):
-            c = o.outputs[0] if o.outputs else None
-            finish = getattr(c, "finish_reason", None)
-            truncated += finish == "length"
-            h = hashlib.sha1(json.dumps(m, ensure_ascii=False).encode("utf-8")).hexdigest()[:12]
-            probs = item_probs(c, id0, id1) if (c and a.logprobs) else {}
-            f.write(json.dumps({"id": rec["id"], "text": c.text if c else "", "prompt_hash": h,
-                                "finish": finish, "out_tokens": len(c.token_ids) if c else 0,
+        for k, rec in enumerate(recs):
+            idx = [j for j, o in enumerate(owner) if o == k]
+            comps = [outs[j].outputs[0] if outs[j].outputs else None for j in idx]
+            finishes = [getattr(c, "finish_reason", None) for c in comps]
+            truncated += sum(x == "length" for x in finishes)
+            texts = [c.text if c else "" for c in comps]
+            text = s.merge_group_outputs(texts, groups) if group_mode else texts[0]
+            probs: Dict[str, float] = {}
+            if a.logprobs:
+                for c in comps:
+                    if c:
+                        probs.update(item_probs(c, id0, id1))
+            h = hashlib.sha1(json.dumps([msgs[j] for j in idx], ensure_ascii=False).encode("utf-8")).hexdigest()[:12]
+            f.write(json.dumps({"id": rec["id"], "text": text, "prompt_hash": h,
+                                "finish": finishes if group_mode else finishes[0],
+                                "out_tokens": sum(len(c.token_ids) for c in comps if c),
                                 "p1": probs}, ensure_ascii=False) + "\n")
     rep = {"tag": a.tag, "script": os.path.relpath(a.script, ROOT), "건수": len(recs),
            "모델로드_s": round(runner.load_seconds, 1), "추론_s": round(inf_s, 1),
