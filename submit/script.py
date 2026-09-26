@@ -565,6 +565,8 @@ def qr_v4(rec):
 
 QR_REGION_TOKEN = re.compile(r"\[지역:[^\]]*\]")
 QR_MONEY = re.compile(r"(?:(\d+(?:\.\d+)?)\s*억)?\s*(?:(\d+(?:\.\d+)?)\s*천\s*만)?\s*(?:([\d,]+)\s*만)?\s*(?:([\d,]{4,}))?\s*원")
+QR_PLEDGE = re.compile(r"(?:물품\s*공급|기술\s*지원|공급)[^\n]{0,15}?(?:확약서|협약서|확인서)")
+QR_BID = re.compile(r"입\s*찰\s*(?:참가|서|시|등록)|투\s*찰|제출\s*마감|참가\s*신청|입찰\s*참가자는")
 QR_V1 = re.compile(r"(고등교육법|산학협력단|대학(?:교)?|연구기관|협회\s*회원|정부출연)[^\n]{0,60}?"
                    r"(?:만\s*(?:참여|참가|입찰)|에\s*한하여|으로\s*한정|로\s*한정|참여\s*가능)")
 QR_SHARE = re.compile(r"(?:지분|출자\s*비율|분담\s*비율)[^\n]{0,40}?(\d{1,2}(?:\.\d+)?)\s*%")
@@ -624,6 +626,28 @@ def qualification_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any]
                 a = t.rfind("\n", 0, mm.start()) + 1
                 b = t.find("\n", mm.end())
                 found["v1"] = t[a: b if b != -1 else len(t)].strip()[:480]
+    # v2: 고시금액 미만(지방 소액수의 제외)인데 참가자격 실적 문구 줄에 금액 '이상' 실적 요구 (dev 4/3/3, 무라벨 0.30배)
+    if price and price < GOSI_AMOUNT * 0.9 and not ("지방" in str(m.get("적용계약법") or "")
+                                                   and "소액수의" in str(m.get("낙찰방법") or "")):
+        for d in rec["docs"]:
+            t = d["text"]
+            for mm in QR_PERF.finditer(t):
+                if "v2" in found or not qr_in_qual(t, mm.start()):
+                    continue
+                a = t.rfind("\n", 0, mm.start()) + 1
+                b = t.find("\n", mm.end())
+                line = t[a: b if b != -1 else len(t)]
+                if "이상" in line and qr_money(line):
+                    found["v2"] = line.strip()[:480]
+    # v19: 물품공급·기술지원 확약서를 입찰 단계(같은 줄에 입찰 참가·투찰·제출 마감)에 요구 (dev 3/2/3, 0.35배)
+    for d in rec["docs"]:
+        t = d["text"]
+        for mm in QR_PLEDGE.finditer(t):
+            a = t.rfind("\n", 0, mm.start()) + 1
+            b = t.find("\n", mm.end())
+            line = t[a: b if b != -1 else len(t)]
+            if "v19" not in found and QR_BID.search(line):
+                found["v19"] = line.strip()[:480]
     # v21: 공동수급 구성원 최소 지분율을 5% 미만으로 정함 (dev 4/0/2, 0.07배). 5%는 dev 라벨이 갈려 제외
     ft = full_text(rec)
     for mm in QR_SHARE.finditer(ft):
