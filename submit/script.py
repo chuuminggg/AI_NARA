@@ -414,6 +414,87 @@ def build_fact_messages(rec: Dict[str, Any], catalog: List[Dict[str, str]], max_
     ]
 
 
+# ----- 직접생산 요구 문장 × 경쟁제품 고시 대조 규칙 (v11·v12, 0→1만) -----
+# 참가자격으로 직접생산확인을 요구하는 문장이 지목한 품명(10자리 번호·세부품명)을 고시와 대조합니다.
+# 고시 특이사항의 "추정가격 N억원 미만" 상한을 넘으면 그 품명은 경쟁제품이 아닙니다.
+#   - 지목 품명이 모두 경쟁제품이 아닌데 직생을 요구 → v12(일반제품 직생 제한)
+#   - 경쟁제품인데 공고 어디에도 중소기업자 참가 조건이 없음 → v11(중기간 경쟁제품 중소 없음)
+# dev: v12 TP2/FP0, v11 TP2/FP1. 무라벨 발화율은 dev 대비 v12 0.07배, v11 0.53배(서버에서는 드물게 발화).
+CATALOG_RULES = True
+CAT_CAP = re.compile(r"추정가격\s*([\d,.]+)\s*억\s*원?\s*미만")
+DP_DEMAND = re.compile(r"직접\s*생산\s*확인\s*(?:증명서|서류|기준)?[^.\n]{0,40}?"
+                       r"(?:소지|보유|제출|갖추|갖춘|있는\s*자|발급)")
+DP_SANCTION = re.compile(r"직접\s*생산\s*확인\s*기준을?\s*위반|직접생산\s*여부\s*확인\s*결과")
+SME_CLAUSE = re.compile(r"중소기업(?:자|기본법)?[^.\n]{0,60}?(?:확인서|제한|한정|참가|자격|로서|이어야)")
+
+
+def catalog_cap(row: Dict[str, str]) -> Optional[float]:
+    m = CAT_CAP.search(row.get("특이사항") or "")
+    return float(m.group(1).replace(",", "")) * 1e8 if m else None
+
+
+def dp_demand(rec: Dict[str, Any], catalog: List[Dict[str, str]]) -> Tuple[Optional[str], set]:
+    """(참가자격 직생 요구 원문, 그 주변에서 지목한 세부품명번호). 요구가 없으면 (None, 빈 집합)."""
+    quote, codes = None, set()
+    names = [(re.sub(r"\s+", "", r.get("세부품명", "")), r.get("세부품명번호")) for r in catalog]
+    for d in rec["docs"]:
+        t = d["text"]
+        for m in DP_DEMAND.finditer(t):
+            w = t[max(0, m.start() - 200): m.end() + 200]
+            if DP_SANCTION.search(w):
+                continue                                   # 계약 후 제재 안내는 참가자격 요구가 아님
+            if quote is None:
+                a = t.rfind("\n", 0, m.start()) + 1
+                b = t.find("\n", m.end())
+                quote = t[a: b if b != -1 else len(t)][:EVIDENCE_MAX]
+            codes |= set(re.findall(r"(?<!\d)\d{10}(?!\d)", w))
+            flat = re.sub(r"\s+", "", w)
+            codes |= {c for n, c in names if len(n) >= 4 and n in flat}
+    return quote, codes
+
+
+def catalog_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any],
+                  catalog: List[Dict[str, str]]) -> Dict[str, Dict[str, Any]]:
+    if not CATALOG_RULES or not catalog:
+        return judgment
+    quote, codes = dp_demand(rec, catalog)
+    if quote is None or not codes:
+        return judgment
+    by_code = {r.get("세부품명번호"): r for r in catalog}
+    price = parse_amount(rec.get("meta") or {})
+    competitive = False
+    for c in codes:
+        row = by_code.get(c)
+        if row is None:
+            continue
+        cap = catalog_cap(row)
+        if cap is not None and price is not None and price >= cap:
+            continue
+        competitive = True
+        break
+    out = dict(judgment)
+    if not competitive and out["v12"]["위반여부"] != 1:
+        out["v12"] = {"위반여부": 1, "근거문구": quote}
+    elif competitive and out["v11"]["위반여부"] != 1 and not SME_CLAUSE.search(full_text(rec)):
+        out["v11"] = {"위반여부": 1, "근거문구": ""}
+    return out
+
+
+def restore_quote(quote: Optional[str], src: str) -> Optional[str]:
+    """공백·줄바꿈만 다른 인용을 원문 표기로 되돌립니다. 못 찾으면 None. (8자 미만은 오일치 위험으로 제외)"""
+    if not quote:
+        return None
+    flat_q = re.sub(r"\s+", "", quote)
+    if len(flat_q) < 8:
+        return None
+    idx = [i for i, ch in enumerate(src) if not ch.isspace()]
+    flat = "".join(src[i] for i in idx)
+    k = flat.find(flat_q)
+    if k == -1:
+        return None
+    return src[idx[k]: idx[k + len(flat_q) - 1] + 1]
+
+
 def parse_facts(text: str) -> Optional[Dict[str, Any]]:
     obj = extract_json(text)
     if not isinstance(obj, dict) or not all(k in obj for k in FACT_SCHEMA["properties"]):
@@ -429,7 +510,10 @@ def decide_from_facts(facts: Optional[Dict[str, Any]], rec: Dict[str, Any],
     src = unicodedata.normalize("NFC", full_text(rec))
 
     def quoted(q):
-        return bool(isinstance(q, str) and q.strip() and unicodedata.normalize("NFC", q).strip() in src)
+        if not (isinstance(q, str) and q.strip()):
+            return False
+        q = unicodedata.normalize("NFC", q).strip()
+        return q in src or restore_quote(q, src) is not None
 
     kind = facts["구매대상_구분"]
     if kind == "미확인" or not quoted(facts["구매대상_인용"]):
@@ -717,8 +801,9 @@ def clean_evidence(ev: Optional[str], src: str) -> str:
     ev = unicodedata.normalize("NFC", ev).replace("\r", "").strip()
     if not ev or ev[0] in "=+@":
         return ""
-    ev = ev[:EVIDENCE_MAX]
-    return ev if ev in src else ""
+    if ev not in src:                              # 공백·줄바꿈만 다르면 원문 표기로 복원
+        ev = restore_quote(ev, src) or ""
+    return ev[:EVIDENCE_MAX]
 
 
 def postprocess(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -881,7 +966,7 @@ def run(input_path: str, out_path: str, runner_cls, limit: Optional[int], chunk:
     tbl, schema = item_table(data_dir), decode_schema(data_dir)
     system_prompt = build_system_prompt(tbl)
     group_schemas = [restrict_schema(schema, g) for g in ITEM_GROUPS]
-    catalog = load_catalog(data_dir) if FACTS_MODE else []
+    catalog = load_catalog(data_dir) if (FACTS_MODE or CATALOG_RULES) else []
     facts_used = 0
     runner = runner_cls(schema, **runner_kw)
     log(f"모델 로드 {runner.load_seconds:.1f}s · GROUP_MODE={GROUP_MODE} · 임계값 {len(ITEM_THRESHOLDS)}개")
@@ -976,7 +1061,7 @@ def run(input_path: str, out_path: str, runner_cls, limit: Optional[int], chunk:
             invalid += int(len(missing) == 24)
             filled += len(missing)
             before = sum(1 for v in ITEMS if parsed[v]["근거문구"] and parsed[v]["위반여부"] == 1 and v not in ABSENCE)
-            final = apply_gates(apply_thresholds(postprocess(parsed, rec), pr), rec)
+            final = apply_gates(catalog_rules(apply_thresholds(postprocess(parsed, rec), pr), rec, catalog), rec)
             kept = sum(1 for v in ITEMS if final[v]["근거문구"])
             ev_kept += kept
             ev_dropped += before - kept

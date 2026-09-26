@@ -51,9 +51,12 @@ def macro(preds, labels):
 def replay(s, recs, outputs):
     """모델 출력 텍스트 → script.py 파싱·후처리·게이트 → {id: {v: 0/1}}"""
     preds = {}
+    catalog = s.load_catalog(os.path.join(OPEN, "data")) if hasattr(s, "catalog_rules") else []
     for rid, rec in recs.items():
         parsed, _ = s.parse_judgment(outputs[rid])
         final = s.postprocess(parsed, rec)
+        if hasattr(s, "catalog_rules"):                     # script의 run()과 같은 순서
+            final = s.catalog_rules(final, rec, catalog)
         if hasattr(s, "apply_gates"):
             final = s.apply_gates(final, rec)
         preds[rid] = {v: final[v]["위반여부"] for v in ITEMS}
