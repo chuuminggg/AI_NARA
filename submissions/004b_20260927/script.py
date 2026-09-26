@@ -563,6 +563,22 @@ def qr_v4(rec):
     return None
 
 
+QR_REGION_TOKEN = re.compile(r"\[지역:[^\]]*\]")
+
+
+def qr_region_clauses(rec: Dict[str, Any]) -> List[str]:
+    """참가자격 문맥에 있는 지역 제한 문구가 들어 있는 줄."""
+    out = []
+    for d in rec["docs"]:
+        t = d["text"]
+        for m in QR_REGION.finditer(t):
+            if qr_in_qual(t, m.start()):
+                a = t.rfind("\n", 0, m.start()) + 1
+                b = t.find("\n", m.end())
+                out.append(t[a: b if b != -1 else len(t)].strip()[:480])
+    return out
+
+
 def qualification_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     if not QUAL_RULES:
         return judgment
@@ -570,6 +586,14 @@ def qualification_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any]
     price = parse_amount(m)
     limit = LOCAL_REGION_LIMIT if "지방" in str(m.get("적용계약법") or "") else GOSI_AMOUNT
     found = {"v8": qr_v8(rec), "v7": qr_v7(rec, price is None or price < limit), "v4": qr_v4(rec)}
+    # v5: 지역제한 허용 금액 이상인데 참가자격에 지역 제한 (dev 5/2/2, 무라벨 발화율 1.27배)
+    # v6: 허용 금액 미만 지역제한을 시·군·구 단위(익명 토큰 '단위=기초')로 제한, 소액수의 제외 (dev 3/0/3, 0.24배)
+    clauses = qr_region_clauses(rec)
+    if clauses and price is not None and price >= limit:
+        found["v5"] = clauses[0]
+    basic = [c for c in clauses if any("단위=기초" in t for t in QR_REGION_TOKEN.findall(c))]
+    if basic and price is not None and price < limit and "소액수의" not in str(m.get("낙찰방법") or ""):
+        found["v6"] = basic[0]
     out = dict(judgment)
     for v, q in found.items():
         if q and out[v]["위반여부"] != 1:
