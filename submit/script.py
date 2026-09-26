@@ -342,6 +342,151 @@ def restrict_schema(schema: Dict[str, Any], group: List[str]) -> Dict[str, Any]:
             "properties": {v: schema["properties"][v] for v in group}}
 
 
+# ===== 4-2. 사실 추출 요청 (FACTS_MODE, GROUP_MODE에서만) =====
+# 모델에게 위반 여부가 아니라 "문서에 적힌 사실"만 묻고, 판정은 금액 구간·항목 정의에 따른 코드 결정표로 합니다.
+# 대상: v10·v12·v13(경쟁제품·직접생산), v14~v18(금액 구간별 기업규모), v20(SW 참여제한).
+FACTS_MODE = False
+FACT_ITEMS = ["v10", "v12", "v13", "v14", "v15", "v16", "v17", "v18", "v20"]
+_Q = {"type": ["string", "null"], "maxLength": EVIDENCE_MAX}
+FACT_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "properties": {
+        "구매대상_구분": {"type": "string", "enum": ["일반", "경쟁제품", "기타", "미확인"]},
+        "구매대상_인용": _Q,
+        "자격문장_역할": {"type": "string", "enum": ["참가자격", "제출서류목록", "법령인용", "언급없음", "미확인"]},
+        "기업규모_자격": {"type": "string", "enum": ["소기업소상공인만", "중소기업자", "제한없음", "미확인"]},
+        "자격_인용": _Q,
+        "자격절_전체관측": {"type": "string", "enum": ["예", "아니오"]},
+        "우선조달_예외": {"type": "string", "enum": ["있음", "없음", "미확인"]},
+        "직접생산_요구_인용": _Q,
+        "SW사업": {"type": "string", "enum": ["예", "아니오", "미확인"]},
+        "SW참여제한_인용": _Q,
+    },
+}
+FACT_SCHEMA["required"] = list(FACT_SCHEMA["properties"])
+FACT_QUESTION = """
+[사실 추출] 위반 여부를 판정하지 말고, 문서에 적힌 사실만 아래 키로 답한다. 인용은 문서의 연속된 원문 한 구간(500자 이하)이며 없으면 null.
+- 구매대상_구분: 실제로 구매하는 물품·용역이 아래 [경쟁제품 후보]의 중소기업자간 경쟁제품에 해당하면 경쟁제품, 해당하지 않는 일반 물품·용역이면 일반, 공사·엔지니어링·별도 규정의 SW사업 등이면 기타, 판단할 수 없으면 미확인. 후보 목록에 이름이 있다는 것만으로 경쟁제품이 되지 않는다.
+- 구매대상_인용: 구매 대상을 나타내는 원문.
+- 자격문장_역할: 기업규모(중소기업·소기업·소상공인) 문구가 입찰참가자격 조건이면 참가자격, 제출서류 목록에만 있으면 제출서류목록, 법령 인용·배제 조항에만 있으면 법령인용, 없으면 언급없음.
+- 기업규모_자격: 참가할 수 있는 기업규모. 소기업·소상공인만(중기업 배제)이면 소기업소상공인만, 중소기업(중기업 포함)이면 중소기업자, 규모 조건이 없으면 제한없음. 나라장터 메타(조항호내용)는 근거로 쓰지 않는다.
+- 자격_인용: 기업규모 조건 원문. 제한없음이면 관측한 입찰참가자격 절 원문.
+- 자격절_전체관측: 입찰참가자격 절 전체를 봤으면 예.
+- 우선조달_예외: 판로지원법 시행령 제2조의3의 우선조달 예외 사유가 명시돼 있으면 있음, 없으면 없음.
+- 직접생산_요구_인용: 직접생산확인증명서 제출·소지 등 직접생산 요구 원문. 없으면 null.
+- SW사업: 소프트웨어 개발·운영·유지보수가 계약 산출물이면 예.
+- SW참여제한_인용: 대기업·중견기업 참여제한(하한제도) 적용 여부를 밝힌 원문. 없으면 null."""
+
+
+def load_catalog(data_dir: str = DATA_DIR) -> List[Dict[str, str]]:
+    p = os.path.join(data_dir, "법령패키지", "중기부고시", "중기부고시_경쟁제품_세부품명.csv")
+    if not os.path.exists(p):
+        return []
+    with io.open(p, encoding="utf-8-sig", newline="") as f:
+        return [{k: unicodedata.normalize("NFC", v or "") for k, v in r.items()} for r in csv.DictReader(f)]
+
+
+def catalog_matches(rec: Dict[str, Any], catalog: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """메타·문서의 10자리 세부품명번호, 또는 4자 이상 세부품명 문자열이 공고에 나오는 고시 행."""
+    meta_src = str((rec.get("meta") or {}).get("세부품명번호목록") or "")
+    text = full_text(rec)
+    codes = set(re.findall(r"(?<!\d)\d{10}(?!\d)", meta_src + "\n" + text))
+    flat = re.sub(r"\s+", "", meta_src + text)
+    out = []
+    for row in catalog:
+        name = re.sub(r"\s+", "", row.get("세부품명", ""))
+        if row.get("세부품명번호") in codes or (len(name) >= 4 and name in flat):
+            out.append(row)
+    return out
+
+
+def fact_question(rec: Dict[str, Any], catalog: List[Dict[str, str]]) -> str:
+    rows = catalog_matches(rec, catalog)[:12]
+    cand = "\n".join(f"- {r['세부품명번호']} {r['세부품명']}" + (f" (특이사항: {r['특이사항']})" if r.get("특이사항") else "")
+                     for r in rows) or "- (공고에서 찾은 후보 없음)"
+    return FACT_QUESTION + "\n\n[경쟁제품 후보]\n" + cand
+
+
+def build_fact_messages(rec: Dict[str, Any], catalog: List[Dict[str, str]], max_chars: int) -> List[Dict[str, str]]:
+    return [
+        {"role": "system", "content": GROUP_SYSTEM},
+        {"role": "user", "content": build_user_prompt(rec, max_chars) + "\n" + fact_question(rec, catalog)},
+    ]
+
+
+def parse_facts(text: str) -> Optional[Dict[str, Any]]:
+    obj = extract_json(text)
+    if not isinstance(obj, dict) or not all(k in obj for k in FACT_SCHEMA["properties"]):
+        return None
+    return obj
+
+
+def decide_from_facts(facts: Optional[Dict[str, Any]], rec: Dict[str, Any],
+                      catalog: List[Dict[str, str]]) -> Dict[str, Dict[str, Any]]:
+    """사실 → 항목 판정. 확정할 수 없으면 그 항목은 비워 두어 그룹 판정을 그대로 씁니다."""
+    if not facts:
+        return {}
+    src = unicodedata.normalize("NFC", full_text(rec))
+
+    def quoted(q):
+        return bool(isinstance(q, str) and q.strip() and unicodedata.normalize("NFC", q).strip() in src)
+
+    kind = facts["구매대상_구분"]
+    if kind == "미확인" or not quoted(facts["구매대상_인용"]):
+        return {}
+    out: Dict[str, Dict[str, Any]] = {}
+    complete = (facts["자격절_전체관측"] == "예"
+                and (rec.get("input_completeness") or {}).get("완전관측") is True
+                and not any((rec.get("dropped_doc_counts") or {}).values()))
+    matched = bool(catalog_matches(rec, catalog))
+    dp = facts["직접생산_요구_인용"]
+
+    # 역할과 기업규모가 모순이면 기업규모를 미확인으로 둡니다.
+    size, role = facts["기업규모_자격"], facts["자격문장_역할"]
+    if role == "참가자격" and size not in ("소기업소상공인만", "중소기업자"):
+        size = "미확인"
+    if role in ("제출서류목록", "법령인용", "언급없음") and size != "제한없음":
+        size = "미확인"
+    size_ok = size != "미확인" and quoted(facts["자격_인용"])
+
+    # v10·v12·v13 (경쟁제품·직접생산)
+    if kind == "일반" and quoted(dp):
+        out["v12"] = {"위반여부": 1, "근거문구": dp}
+    if kind == "경쟁제품" and complete:
+        out["v10"] = {"위반여부": 0 if quoted(dp) else 1, "근거문구": None}
+    if kind == "경쟁제품" and matched and size_ok and size == "소기업소상공인만" \
+            and "소액수의" not in str((rec.get("meta") or {}).get("낙찰방법") or ""):
+        out["v13"] = {"위반여부": 1, "근거문구": facts["자격_인용"]}
+
+    # v20 (SW 참여제한 문구 부재)
+    if facts["SW사업"] == "예" and complete:
+        out["v20"] = {"위반여부": 0 if quoted(facts["SW참여제한_인용"]) else 1, "근거문구": None}
+
+    # v14~v18 (일반 물품·용역의 금액 구간별 기업규모)
+    band = ["v14", "v15", "v16", "v17", "v18"]
+    if kind in ("경쟁제품", "기타"):             # 고시 이름 일치만으로 내리지 않음 (특이사항 조건 등으로 과대 일치)
+        out.update({v: {"위반여부": 0, "근거문구": None} for v in band})
+        return out
+    price = parse_amount(rec.get("meta") or {})
+    if price is None or not size_ok:
+        return out
+    hit = None
+    if size == "제한없음":
+        if not complete or facts["우선조달_예외"] != "없음":
+            return out
+        hit = "v18" if price < ONE_EOK else ("v16" if price < GOSI_AMOUNT else None)
+    elif price >= GOSI_AMOUNT:
+        hit = "v14"
+    elif price >= ONE_EOK:
+        hit = "v15" if size == "소기업소상공인만" else None
+    else:
+        hit = "v17" if size == "중소기업자" else None
+    out.update({v: {"위반여부": 0, "근거문구": None} for v in band})
+    if hit:
+        out[hit] = {"위반여부": 1, "근거문구": None if hit in ABSENCE else facts["자격_인용"]}
+    return out
+
+
 def merge_group_outputs(texts: List[str], groups: List[List[str]]) -> str:
     """그룹별 출력을 24항목 JSON 하나로 합칩니다. 그룹 밖 항목이 섞여 나와도 무시합니다."""
     merged: Dict[str, Any] = {}
@@ -736,6 +881,8 @@ def run(input_path: str, out_path: str, runner_cls, limit: Optional[int], chunk:
     tbl, schema = item_table(data_dir), decode_schema(data_dir)
     system_prompt = build_system_prompt(tbl)
     group_schemas = [restrict_schema(schema, g) for g in ITEM_GROUPS]
+    catalog = load_catalog(data_dir) if FACTS_MODE else []
+    facts_used = 0
     runner = runner_cls(schema, **runner_kw)
     log(f"모델 로드 {runner.load_seconds:.1f}s · GROUP_MODE={GROUP_MODE} · 임계값 {len(ITEM_THRESHOLDS)}개")
 
@@ -776,10 +923,15 @@ def run(input_path: str, out_path: str, runner_cls, limit: Optional[int], chunk:
                     batch.append(build_group_messages(rec, tbl, g, mc))
                     sch.append(group_schemas[gi])
                     owner.append(k)
-            # 1단계: 공고마다 첫 그룹만 보내 문서 prefill을 한 번씩 계산·캐시
-            # 2단계: 나머지 그룹을 보내 캐시된 문서 접두부를 재사용
-            first = [j for j in range(len(batch)) if j % len(ITEM_GROUPS) == 0]
-            rest = [j for j in range(len(batch)) if j % len(ITEM_GROUPS) != 0]
+                if FACTS_MODE:
+                    batch.append(build_fact_messages(rec, catalog, mc))
+                    sch.append(FACT_SCHEMA)
+                    owner.append(k)
+            # 1단계: 공고마다 첫 요청만 보내 문서 prefill을 한 번씩 계산·캐시
+            # 2단계: 나머지 요청을 보내 캐시된 문서 접두부를 재사용
+            per = len(ITEM_GROUPS) + int(FACTS_MODE)
+            first = [j for j in range(len(batch)) if j % per == 0]
+            rest = [j for j in range(len(batch)) if j % per != 0]
             outs = [""] * len(batch)
             for sel in (first, rest):
                 res = run_chunk(runner, [batch[j] for j in sel], [sch[j] for j in sel])
@@ -788,7 +940,15 @@ def run(input_path: str, out_path: str, runner_cls, limit: Optional[int], chunk:
             rp = getattr(runner, "probs", {})
             for k in range(len(part)):
                 idx = [j for j, o in enumerate(owner) if o == k]
-                texts.append(merge_group_outputs([outs[j] for j in idx], ITEM_GROUPS))
+                merged = merge_group_outputs([outs[j] for j in idx[:len(ITEM_GROUPS)]], ITEM_GROUPS)
+                if FACTS_MODE:
+                    decided = decide_from_facts(parse_facts(outs[idx[-1]]), part[k], catalog)
+                    if decided:
+                        m = json.loads(merged)
+                        m.update(decided)
+                        merged = json.dumps(m, ensure_ascii=False)
+                        facts_used += 1
+                texts.append(merged)
                 pk: Dict[str, float] = {}
                 for j in idx:
                     pk.update(rp.pop(id(batch[j]), {}))
@@ -832,7 +992,7 @@ def run(input_path: str, out_path: str, runner_cls, limit: Optional[int], chunk:
         "건수": len(recs), "모델로드_s": round(runner.load_seconds, 1), "추론_s": round(inf_seconds, 1),
         "건당_s": round(inf_seconds / len(recs), 2), "전체_s": round(time.time() - t_all, 1),
         "유효JSON": len(recs) - invalid, "메운_항목수": filled,
-        "근거_유지": ev_kept, "근거_원문불일치_폐기": ev_dropped,
+        "근거_유지": ev_kept, "근거_원문불일치_폐기": ev_dropped, "사실판정_적용": facts_used,
         "출력": out_path, "자가검증": "PASS" if not errs else errs,
     }
     log(json.dumps(report, ensure_ascii=False))

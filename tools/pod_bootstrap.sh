@@ -36,6 +36,7 @@ run() { tag=$1; shift; echo "=== RUN $tag $(date)"; python tools/gpu_dev_run.py 
 run s003  --script submissions/003_20260926/script.py
 run s003g --script submit/script.py --set USE_ITEM_GUIDE=true
 run s003grp --script submit/script.py --set GROUP_MODE=true
+run s003fct --script submit/script.py --set GROUP_MODE=true --set FACTS_MODE=true
 echo ALL_DONE
 SH
 

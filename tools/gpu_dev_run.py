@@ -71,6 +71,8 @@ def main():
         runner.sp.logprobs = a.logprobs
     id0, id1 = (runner.tok.encode(d, add_special_tokens=False)[-1] for d in ("0", "1"))
     group_mode = bool(getattr(s, "GROUP_MODE", False))
+    facts_mode = group_mode and bool(getattr(s, "FACTS_MODE", False))
+    catalog = s.load_catalog(a.data_dir) if facts_mode else []
     groups = s.ITEM_GROUPS if group_mode else [None]
     gsch = [s.restrict_schema(schema, g) for g in s.ITEM_GROUPS] if group_mode else [None]
     msgs, sps, owner, ntok = [], [], [], []
@@ -82,6 +84,10 @@ def main():
             for gi, g in enumerate(s.ITEM_GROUPS):
                 msgs.append(s.build_group_messages(rec, tbl, g, mc))
                 sps.append(runner.sampling_params(gsch[gi]))
+                owner.append(k)
+            if facts_mode:
+                msgs.append(s.build_fact_messages(rec, catalog, mc))
+                sps.append(runner.sampling_params(s.FACT_SCHEMA))
                 owner.append(k)
         else:
             m, n, _ = s.fit_to_budget(rec, system_prompt, runner, s.MAX_CHARS)
@@ -106,7 +112,14 @@ def main():
             finishes = [getattr(c, "finish_reason", None) for c in comps]
             truncated += sum(x == "length" for x in finishes)
             texts = [c.text if c else "" for c in comps]
-            text = s.merge_group_outputs(texts, groups) if group_mode else texts[0]
+            text = s.merge_group_outputs(texts[:len(groups)], groups) if group_mode else texts[0]
+            facts = s.parse_facts(texts[-1]) if facts_mode else None
+            if facts_mode:
+                decided = s.decide_from_facts(facts, rec, catalog)
+                if decided:
+                    merged = json.loads(text)
+                    merged.update(decided)
+                    text = json.dumps(merged, ensure_ascii=False)
             probs: Dict[str, float] = {}
             if a.logprobs:
                 for c in comps:
@@ -116,7 +129,7 @@ def main():
             f.write(json.dumps({"id": rec["id"], "text": text, "prompt_hash": h,
                                 "finish": finishes if group_mode else finishes[0],
                                 "out_tokens": sum(len(c.token_ids) for c in comps if c),
-                                "p1": probs}, ensure_ascii=False) + "\n")
+                                "p1": probs, "facts": facts}, ensure_ascii=False) + "\n")
     rep = {"tag": a.tag, "script": os.path.relpath(a.script, ROOT), "건수": len(recs),
            "모델로드_s": round(runner.load_seconds, 1), "추론_s": round(inf_s, 1),
            "건당_s": round(inf_s / len(recs), 3), "전체_s": round(time.time() - t0, 1),

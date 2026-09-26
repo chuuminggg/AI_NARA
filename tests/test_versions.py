@@ -106,7 +106,7 @@ def t6_guard(path, step_s):
     s.log = logs.append
 
     class Runner(s.MockRunner):
-        def chat(self, batch):
+        def chat(self, batch, schemas=None):
             clock.now += step_s
             return super().chat(batch)
 
