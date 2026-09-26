@@ -776,7 +776,15 @@ def run(input_path: str, out_path: str, runner_cls, limit: Optional[int], chunk:
                     batch.append(build_group_messages(rec, tbl, g, mc))
                     sch.append(group_schemas[gi])
                     owner.append(k)
-            outs = run_chunk(runner, batch, sch)
+            # 1단계: 공고마다 첫 그룹만 보내 문서 prefill을 한 번씩 계산·캐시
+            # 2단계: 나머지 그룹을 보내 캐시된 문서 접두부를 재사용
+            first = [j for j in range(len(batch)) if j % len(ITEM_GROUPS) == 0]
+            rest = [j for j in range(len(batch)) if j % len(ITEM_GROUPS) != 0]
+            outs = [""] * len(batch)
+            for sel in (first, rest):
+                res = run_chunk(runner, [batch[j] for j in sel], [sch[j] for j in sel])
+                for j, t in zip(sel, res):
+                    outs[j] = t
             rp = getattr(runner, "probs", {})
             for k in range(len(part)):
                 idx = [j for j, o in enumerate(owner) if o == k]
@@ -843,7 +851,8 @@ def main() -> int:
                     help="채점 서버 = int8_per_channel_weight_only · 'none'이면 미양자화")
     ap.add_argument("--gpu-mem", type=float, default=0.92)
     ap.add_argument("--tp", type=int, default=1)
-    ap.add_argument("--chunk", type=int, default=64, help="LLM.chat 한 번에 넘길 건수(시간 가드 점검 단위)")
+    ap.add_argument("--chunk", type=int, default=None,
+                    help="LLM.chat 한 번에 넘길 공고 수(시간 가드 점검 단위). 기본 64, GROUP_MODE는 16(문서 KV 캐시 보존)")
     ap.add_argument("--max-chars", type=int, default=MAX_CHARS, help="문서 글자 수의 초기 상한(토큰 예산에 맞춰 자동 조정)")
     ap.add_argument("--max-tokens", type=int, default=MAX_TOKENS)
     ap.add_argument("--limit", type=int, default=None)
@@ -856,7 +865,8 @@ def main() -> int:
     runner_kw = {} if a.mock else dict(model_dir=a.model_dir, quant=quant, max_tokens=a.max_tokens,
                                        seed=SEED, gpu_mem=a.gpu_mem, tp=a.tp)
     report = run(input_path, out_path, MockRunner if a.mock else VLLMRunner,
-                 limit=a.limit, chunk=a.chunk, max_chars=a.max_chars, data_dir=a.data_dir, **runner_kw)
+                 limit=a.limit, chunk=a.chunk or (16 if GROUP_MODE else 64),
+                 max_chars=a.max_chars, data_dir=a.data_dir, **runner_kw)
     return 0 if report.get("자가검증") in ("PASS", None) else 1
 
 
