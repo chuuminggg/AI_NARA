@@ -682,7 +682,7 @@ def qualification_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any]
 # 대상 선정: 3차 서버 0.21과 비슷한 가상 모델(재현율 50%·오탐 15%, 게이트 적용)의 항목별 F1보다
 # 규칙 단독 dev F1이 높은 항목(17개). 나머지 7개(v9·v10·v15·v17·v20·v23·v24)는 모델 판정을 씁니다.
 RULE_OVERRIDE_ITEMS = {"v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v11", "v12", "v13", "v14",
-                       "v16", "v18", "v19", "v21", "v22"}
+                       "v16", "v18", "v19", "v21", "v22", "v23"}
 
 
 # ----- 공고 본문 참가자격의 기업규모 규칙 (v14·v16) -----
@@ -735,16 +735,18 @@ def size_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any],
     complete = (rec.get("input_completeness") or {}).get("완전관측") is True
     if price >= GOSI_AMOUNT and kind in ("sme", "small"):
         out["v14"] = {"위반여부": 1, "근거문구": quote or ""}
-    elif ONE_EOK <= price < GOSI_AMOUNT and kind == "none" and complete:
+    elif (ONE_EOK <= price < GOSI_AMOUNT and kind == "none" and complete
+          and "수의" not in str((rec.get("meta") or {}).get("계약방법") or "")):
         out["v16"] = {"위반여부": 1, "근거문구": ""}
     return out                                          # v15(소기업만) 규칙은 dev 2/5/4로 모델보다 못해 쓰지 않음
 
 
 def small_price_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     """v18: 추정가격 1억 미만인데 본문 참가자격에 기업규모 제한이 없음(완전관측) (dev 6/24/1)."""
-    price = parse_amount(rec.get("meta") or {})
-    if price is None or price >= ONE_EOK:
-        return judgment
+    m = rec.get("meta") or {}
+    price = parse_amount(m)
+    if price is None or price >= ONE_EOK or "수의" in str(m.get("계약방법") or ""):
+        return judgment                                 # 수의계약은 적용이 불명확(운영진 답변) — dev 오탐 14/24가 수의계약
     kind, _ = size_class(rec)
     out = dict(judgment)
     if kind == "none" and (rec.get("input_completeness") or {}).get("완전관측") is True:
@@ -758,6 +760,57 @@ QR_SITE = re.compile(r"현장\s*설명회[^\n]{0,60}?(?:참석|참가)[^\n]{0,60
 QR_SITE2 = re.compile(r"(?:현장|사업|과업)\s*설명회[^\n]{0,120}?(?:미\s*참석|불\s*참|참석하지\s*(?:아니한|않은)"
                       r"|참석한\s*(?:자|업체)(?:에\s*한|만|로\s*한정)?)")
 QR_SITE_NEG = re.compile(r"허용되지|제외|접수하지|불가|자격|에\s*한|만\s*(?:입찰|참가)|참석한\s*자")
+
+
+# ----- v23: 지방 협상계약의 제안요청서(현장·사업) 설명 시기 -----
+# 지방자치단체 입찰시 낙찰자 결정기준 제7장 제3절 2-다: 설명은 제안서 제출마감일 전일부터 기산하여
+# 40일(추정가격 10억 이상)·20일(1억~10억)·10일(1억 미만) 전에 하고, 공고는 설명일 전일부터 7일 전에 해야 한다.
+# 제출마감은 메타 개찰예정일자로 근사합니다. dev 4/3/1.
+V23_BRIEF = re.compile(r"(?:현장|사업|과업|제안\s*요청서?)\s*설명(?:회)?")
+V23_DATE = re.compile(r"(?:(20\d{2})\s*[.\-/년]\s*)?(\d{1,2})\s*[.\-/월]\s*(\d{1,2})\s*[.일]?")
+V23_SKIP = re.compile(r"없음|미실시|생략|하지\s*않")
+
+
+def _ymd(value: Any):
+    import datetime as _dt
+    s_ = re.sub(r"\D", "", str(value or ""))
+    try:
+        return _dt.date(int(s_[:4]), int(s_[4:6]), int(s_[6:8]))
+    except (ValueError, IndexError):
+        return None
+
+
+def v23_rule(rec: Dict[str, Any]) -> Optional[Tuple[bool, str]]:
+    """(설명 시기 위반 여부, 근거 줄). 설명일을 못 찾으면 None."""
+    import datetime as _dt
+    m = rec.get("meta") or {}
+    if "지방" not in str(m.get("적용계약법") or "") or "협상" not in str(m.get("낙찰방법") or ""):
+        return None
+    post, dead = _ymd(m.get("공고게시일자")), _ymd(m.get("개찰예정일자"))
+    if not post or not dead:
+        return None
+    p = parse_amount(m) or 0
+    need = 40 if p >= 1e9 else (20 if p >= ONE_EOK else 10)
+    for d in rec["docs"]:
+        t = d["text"]
+        for bm in V23_BRIEF.finditer(t):
+            w = t[bm.end(): bm.end() + 120]
+            if V23_SKIP.search(w[:30]):
+                continue
+            for dm in V23_DATE.finditer(w):
+                y = int(dm.group(1)) if dm.group(1) else post.year
+                try:
+                    b = _dt.date(y, int(dm.group(2)), int(dm.group(3)))
+                except ValueError:
+                    continue
+                if not (post <= b <= dead):
+                    continue
+                one = _dt.timedelta(days=1)
+                short = ((dead - one) - b).days < need or ((b - one) - post).days < 7
+                a = t.rfind("\n", 0, bm.start()) + 1
+                e = t.find("\n", bm.end())
+                return short, t[a: e if e != -1 else len(t)].strip()[:480]
+    return None
 
 
 def misc_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any],
@@ -780,6 +833,9 @@ def misc_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any],
             a = ft.rfind("\n", 0, sm.start()) + 1
             b = ft.find("\n", sm.end())
             out["v22"] = {"위반여부": 1, "근거문구": ft[a: b if b != -1 else len(ft)].strip()[:480]}
+    r23 = v23_rule(rec)
+    if r23 and r23[0]:
+        out["v23"] = {"위반여부": 1, "근거문구": r23[1]}
     if "소액수의" not in str(m.get("낙찰방법") or ""):
         _, codes = dp_demand(rec, catalog)
         price = parse_amount(m)
