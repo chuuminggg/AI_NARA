@@ -1258,6 +1258,9 @@ def gate_closed(rec: Dict[str, Any]) -> Dict[str, str]:
             closed["v5"] = "지역제한 허용 금액 미만"
         if amt < ONE_EOK * 0.9 or amt >= GOSI_AMOUNT * 1.1:   # 1억 이상~고시금액 미만 항목
             closed["v15"] = closed["v16"] = "1억~고시금액 구간 밖"
+    # v15(소기업·소상공인만 제한)는 본문 참가자격에 기업규모 제한 문구가 있어야 성립 (dev 막힌 정답 양성 0)
+    if "v15" not in closed and size_class(rec)[0] == "none":
+        closed["v15"] = "본문 기업규모 제한 없음"
         if amt >= ONE_EOK * 1.1:                         # 1억 미만 항목
             closed["v17"] = closed["v18"] = "1억 이상"
     return closed
