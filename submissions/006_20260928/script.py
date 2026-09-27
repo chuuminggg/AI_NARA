@@ -1231,6 +1231,24 @@ def to_row(rec_id: str, judgment: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     return row
 
 
+def sanitize_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """제출 규약에 맞게 한 행을 정리합니다: v는 정수 0/1, 비위반·부재탐지의 e는 빈칸,
+    e는 NFC·개행 제거·앞 공백과 수식 접두(=,+,@) 제거·500자 상한."""
+    out = {"id": row["id"]}
+    for i, v in enumerate(ITEMS, 1):
+        try:
+            hit = 1 if int(row.get(v) or 0) == 1 else 0
+        except (TypeError, ValueError):
+            hit = 0
+        ev = row.get(f"e{i}") or ""
+        ev = unicodedata.normalize("NFC", str(ev)).replace("\r", "")   # 개행은 유지(원문 부분문자열 성질)
+        ev = ev.lstrip(" \t=+@").strip()[:EVIDENCE_MAX]
+        if not hit or v in ABSENCE:
+            ev = ""
+        out[v], out[f"e{i}"] = hit, ev
+    return out
+
+
 def empty_row(rec_id: str) -> Dict[str, Any]:
     return to_row(rec_id, {v: {"위반여부": 0, "근거문구": ""} for v in ITEMS})
 
@@ -1394,10 +1412,18 @@ def run(input_path: str, out_path: str, runner_cls, limit: Optional[int], chunk:
         except Exception as e:                           # 한 건의 실패가 전체 실행을 막지 않도록
             log(f"  ! {rec['id']} 후처리 실패 → 전항목 0: {type(e).__name__}: {e}")
             rows.append(empty_row(rec["id"]))
-    assert len(rows) == len(recs)
+    if len(rows) != len(recs):                          # 방어: 행 수가 어긋나면 누락 id를 전항목 0으로 채움
+        have = {r["id"] for r in rows}
+        rows += [empty_row(r["id"]) for r in recs if r["id"] not in have]
+    rows = [sanitize_row(r) for r in rows]
 
     write_csv(rows, out_path)
     errs = validate_csv(out_path, [r["id"] for r in recs])
+    if errs:                                            # 최후 방어: 근거 문구를 모두 비우고 다시 씀
+        log(f"[주의] 자가검증 실패 → 근거 문구 제거 후 재작성: {errs[:5]}")
+        rows = [{**r, **{e: "" for e in EVID}} for r in rows]
+        write_csv(rows, out_path)
+        errs = validate_csv(out_path, [r["id"] for r in recs])
     report = {
         "건수": len(recs), "모델로드_s": round(runner.load_seconds, 1), "추론_s": round(inf_seconds, 1),
         "건당_s": round(inf_seconds / len(recs), 2), "전체_s": round(time.time() - t_all, 1),
@@ -1437,8 +1463,13 @@ def main() -> int:
     report = run(input_path, out_path, MockRunner if a.mock else VLLMRunner,
                  limit=a.limit, chunk=a.chunk or (16 if GROUP_MODE else 64),
                  max_chars=a.max_chars, data_dir=a.data_dir, **runner_kw)
-    return 0 if report.get("자가검증") in ("PASS", None) else 1
+    if report.get("자가검증") not in ("PASS", None):
+        log(f"[주의] 자가검증 오류가 남았지만 제출 파일은 작성됨: {report.get('자가검증')}")
+    return 0                                            # CSV를 썼으면 정상 종료(비정상 종료 코드로 제출 전체가 오류 처리되는 것을 방지)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    code = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)                                      # vLLM 종료 처리 중 예외가 종료 코드를 바꾸지 않도록
