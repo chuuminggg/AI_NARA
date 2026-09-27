@@ -565,6 +565,12 @@ def qr_v4(rec):
 
 QR_REGION_TOKEN = re.compile(r"\[지역:[^\]]*\]")
 QR_MONEY = re.compile(r"(?:(\d+(?:\.\d+)?)\s*억)?\s*(?:(\d+(?:\.\d+)?)\s*천\s*만)?\s*(?:([\d,]+)\s*만)?\s*(?:([\d,]{4,}))?\s*원")
+# 실적 금액 요구 표현 확장: '실적이 3천만원 이상', '실적 5천만원 이상 보유' (v2, dev 7/4/0, 무라벨 0.27배)
+QR_PERF2 = re.compile(QR_PERF.pattern + r"|실적(?:이|을)?\s*[^\n]{0,25}?\d[\d,.]*\s*(?:억|천만|만)?\s*원[^\n]{0,10}?(?:이상|초과)")
+# v1 확장: 일정 규모 이상의 인력·시설·센터 보유를 참가자격으로 요구 (운영진 답변: 과업 관련성 미확인 시설·인력 보유 제한도 v1)
+# dev v1 4/1/3, 무라벨 0.76배
+QR_V1B = re.compile(r"(?:\d+\s*(?:명|인|대|개소|곳)\s*이상|전국|모든)[^\n]{0,40}?"
+                    r"(?:인력|시설|센터|장비|사무소|지사|차량|정비소)[^\n]{0,30}?(?:보유|갖춘|갖추|있는|확보)")
 QR_PLEDGE = re.compile(r"(?:물품\s*공급|기술\s*지원|공급)[^\n]{0,15}?(?:확약서|협약서|확인서)")
 QR_BID = re.compile(r"입\s*찰\s*(?:참가|서|시|등록)|투\s*찰|제출\s*마감|참가\s*신청|입찰\s*참가자는")
 QR_V1 = re.compile(r"(고등교육법|산학협력단|대학(?:교)?|연구기관|협회\s*회원|정부출연)[^\n]{0,60}?"
@@ -621,17 +627,17 @@ def qualification_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any]
     # v1: 참가자격을 대학·산학협력단·연구기관·협회 회원 등 특정 기관으로 한정 (dev 2/0/5, 무라벨 0.23배)
     for d in rec["docs"]:
         t = d["text"]
-        for mm in QR_V1.finditer(t):
+        for mm in list(QR_V1.finditer(t)) + list(QR_V1B.finditer(t)):
             if "v1" not in found and qr_in_qual(t, mm.start()):
                 a = t.rfind("\n", 0, mm.start()) + 1
                 b = t.find("\n", mm.end())
                 found["v1"] = t[a: b if b != -1 else len(t)].strip()[:480]
     # v2: 고시금액 미만(지방 소액수의 제외)인데 참가자격 실적 문구 줄에 금액 '이상' 실적 요구 (dev 4/3/3, 무라벨 0.30배)
-    if price and price < GOSI_AMOUNT * 0.9 and not ("지방" in str(m.get("적용계약법") or "")
-                                                   and "소액수의" in str(m.get("낙찰방법") or "")):
+    if price and price < GOSI_AMOUNT and not ("지방" in str(m.get("적용계약법") or "")
+                                             and "소액수의" in str(m.get("낙찰방법") or "")):
         for d in rec["docs"]:
             t = d["text"]
-            for mm in QR_PERF.finditer(t):
+            for mm in QR_PERF2.finditer(t):
                 if "v2" in found or not qr_in_qual(t, mm.start()):
                     continue
                 a = t.rfind("\n", 0, mm.start()) + 1
@@ -748,6 +754,10 @@ def small_price_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any]) 
 
 QR_SITE = re.compile(r"현장\s*설명회[^\n]{0,60}?(?:참석|참가)[^\n]{0,60}?(?:업체|자)[^\n]{0,30}?"
                      r"(?:에\s*한하여|만|한함|자격|입찰\s*참가)")
+# 사업·과업 설명회, '미참석·불참 업체 제외', '참석하지 아니한 업체의 입찰 참가는 허용되지 않음' (dev v22 5/0/0, 무라벨 0.13배)
+QR_SITE2 = re.compile(r"(?:현장|사업|과업)\s*설명회[^\n]{0,120}?(?:미\s*참석|불\s*참|참석하지\s*(?:아니한|않은)"
+                      r"|참석한\s*(?:자|업체)(?:에\s*한|만|로\s*한정)?)")
+QR_SITE_NEG = re.compile(r"허용되지|제외|접수하지|불가|자격|에\s*한|만\s*(?:입찰|참가)|참석한\s*자")
 
 
 def misc_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any],
@@ -759,6 +769,13 @@ def misc_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any],
     ft = full_text(rec)
     if "협상" in str(m.get("낙찰방법") or ""):
         sm = QR_SITE.search(ft)
+        if not sm:
+            for cand in QR_SITE2.finditer(ft):
+                a = ft.rfind("\n", 0, cand.start()) + 1
+                b = ft.find("\n", cand.end())
+                if QR_SITE_NEG.search(ft[a: b if b != -1 else len(ft)]):
+                    sm = cand
+                    break
         if sm:
             a = ft.rfind("\n", 0, sm.start()) + 1
             b = ft.find("\n", sm.end())
