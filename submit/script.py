@@ -465,12 +465,14 @@ def catalog_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any],
         m = rec.get("meta") or {}
         clause = str(m.get("조항호내용") or "")
         ft = full_text(rec)
-        if ((SZ_COMPETITIVE.search(ft) or ("지정" in clause and "공고한" in clause))
-                and judgment["v11"]["위반여부"] != 1 and not SME_CLAUSE.search(ft)):
-            out = dict(judgment)
+        comp_signal = bool(SZ_COMPETITIVE.search(ft) or ("지정" in clause and "공고한" in clause))
+        out = dict(judgment)
+        if comp_signal and judgment["v11"]["위반여부"] != 1 and not SME_CLAUSE.search(ft):
             out["v11"] = {"위반여부": 1, "근거문구": ""}
-            return out
-        return judgment
+        elif quote is not None and not comp_signal and judgment["v12"]["위반여부"] != 1:
+            # 직생을 요구했는데 경쟁제품이라는 단서(고시 품명·공고 표시·지정 조항호)가 전혀 없음 → v12 (dev 2/0/4 → 4/1/2)
+            out["v12"] = {"위반여부": 1, "근거문구": quote}
+        return out
     by_code = {r.get("세부품명번호"): r for r in catalog}
     price = parse_amount(rec.get("meta") or {})
     competitive = False
