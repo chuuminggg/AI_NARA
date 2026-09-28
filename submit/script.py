@@ -1314,6 +1314,7 @@ V17_SME_CERT = re.compile(r"중소기업\s*[·ㆍ・･․‧,/]\s*소상공인\
 # v10은 중기간 경쟁제품 입찰에만 성립: 고시 품명·번호, 직접생산·경쟁제품 언급, '지정 공고한' 조항호 중 하나가 있어야 함
 # (dev 통과 160→48건, 막힌 정답 양성 2/7 — 공고에 경쟁제품 단서가 전혀 없는 경우)
 GATE_COMP_HINT = re.compile(r"직접\s*생산|경쟁\s*제품|지정\s*[.·]?\s*(?:공고|고시)한")
+SOLE_SOURCE_KEEP = {"v3", "v4", "v9", "v17", "v21", "v24"}   # 수의계약에서도 성립할 수 있는 항목
 CATALOG_CACHE: List[Dict[str, str]] = []           # run()에서 채움 — 게이트가 직생 요구를 확인할 때 사용
 GATE_MODEL_HINT = re.compile(r"모델\s*명|제조사|제조\s*회사|상표|브랜드|(?<![A-Za-z])(?!ISO|KS|RJ)[A-Z]{2,}-?\d{2,}|동등\s*(?:이상|품)")
 
@@ -1329,6 +1330,11 @@ def gate_closed(rec: Dict[str, Any]) -> Dict[str, str]:
         closed["v23"] = "협상 계약 아님"
     if law and "지방" not in law:
         closed["v23"] = "지방계약법 아님"
+    # 수의계약은 경쟁입찰이 아니어서 참가자격 제한 항목이 성립하지 않음 (dev 수의계약 35건 양성은 아래 6개 항목에만 있음)
+    if "수의" in str(m.get("계약방법") or ""):
+        for v in ITEMS:
+            if v not in SOLE_SOURCE_KEEP:
+                closed.setdefault(v, "수의계약")
     # v9(특정 모델명 명시): 물품이 아니고, 규격서가 없고, 모델명·제조사·상표·영문+숫자 모델 표기도 없으면 성립 불가
     # (dev 막힌 문서 35%, 막힌 정답 양성 0, 무라벨 52%)
     if ("물품" not in str(m.get("업무구분") or "") and not any(d["type"] == "규격서" for d in rec["docs"])
