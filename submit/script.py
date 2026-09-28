@@ -70,6 +70,7 @@ ONE_EOK = 100_000_000
 # 지방계약 물품·일반용역 지역제한 금액(대회 공지): 시·도 3억 5천만 원, 세종·시·군·구 5억 원.
 # 발주기관 단위를 확정하지 않고 둘 중 낮은 값을 써서 게이트를 느슨하게 둡니다.
 LOCAL_REGION_LIMIT = 350_000_000
+LOCAL_REGION_LIMIT_BASIC = 500_000_000                # 세종·시·군·구
 
 # 항목별 P(위반=1) 임계값. 비어 있으면 모델의 0/1 판정을 그대로 씁니다(logprob 미요청).
 # 값은 dev 라벨로 정한 고정 상수이며 평가 데이터로 갱신하지 않습니다.
@@ -564,6 +565,7 @@ def qr_v4(rec):
 
 
 QR_REGION_TOKEN = re.compile(r"\[지역:[^\]]*\]")
+QR_BASIC_ORG = re.compile(r"\[(?:수요|발주)기관\([^)]*기초[^)]*\)")   # 익명 토큰의 기초자치단체 발주기관
 QR_BASIC_LINE = re.compile(r"\[지역:[^\]]*단위=기초[^\]]*\]\s*(?:지역|관내)?\s*(?:업체|소재|에\s*소재)")
 QR_MONEY = re.compile(r"(?:(\d+(?:\.\d+)?)\s*억)?\s*(?:(\d+(?:\.\d+)?)\s*천\s*만)?\s*(?:([\d,]+)\s*만)?\s*(?:([\d,]{4,}))?\s*원")
 # 실적 금액 요구 표현 확장: '실적이 3천만원 이상', '실적 5천만원 이상 보유' (v2, dev 7/4/0, 무라벨 0.27배)
@@ -610,6 +612,8 @@ def qualification_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any]
     m = rec.get("meta") or {}
     price = parse_amount(m)
     limit = LOCAL_REGION_LIMIT if "지방" in str(m.get("적용계약법") or "") else GOSI_AMOUNT
+    if "지방" in str(m.get("적용계약법") or "") and QR_BASIC_ORG.search(full_text(rec)):
+        limit = LOCAL_REGION_LIMIT_BASIC                # 시·군·구(기초) 발주는 5억 원(대회 공지)
     found = {"v8": qr_v8(rec), "v7": qr_v7(rec, price is None or price < limit), "v4": qr_v4(rec)}
     # v5: 지역제한 허용 금액 이상인데 참가자격에 지역 제한 (dev 5/2/2, 무라벨 발화율 1.27배)
     # v6: 허용 금액 미만 지역제한을 시·군·구 단위(익명 토큰 '단위=기초')로 제한, 소액수의 제외 (dev 3/0/3, 0.24배)
@@ -709,9 +713,10 @@ SZ_RESTRICT = re.compile(r"제한|한정|에\s*한함|에\s*한하여|만\s*(?:�
 # 판로지원 예외(우선조달계약 예외) 명시 — 항목표 비고: 예외를 명시하면 기업규모 제한이 없어도 v16·v18 위반 아님
 # (dev v16 오탐 7→4, v18 10→4, 막힌 정답 양성 0)
 SZ_EXCEPTION = re.compile(r"우선\s*조달\s*계약[^\n]{0,20}?예외|중소기업자\s*간\s*경쟁\s*입찰의\s*예외|제\s*2\s*조의\s*3")
-SZ_LAWNAME = re.compile(r"「[^」]*」|｢[^｣]*｣|『[^』]*』|\[[^\]]*\]")
+SZ_LAWNAME = re.compile(r"「[^」]*」|｢[^｣]*｣|『[^』]*』|\[[^\]]*\]|‘[^’]*’|“[^”]*”")
 SZ_RULENAME = re.compile(r"중소기업\s*범위\s*및\s*확인에\s*관한\s*규정"
                          r"|중?\s*[·ㆍ・/]?\s*소기업\s*[·ㆍ・/]?\s*소상공인\s*확인서|중소기업\s*확인서")
+SZ_COMPETITIVE = re.compile(r"(?:중기간|중소기업자\s*간)\s*경쟁\s*제품")
 SZ_SME = re.compile(r"중소기업(?!자간)|중기업|중\s*[·ㆍ・/]\s*소")
 SZ_SMALL = re.compile(r"(?<!중)소기업|소상공인")
 
@@ -737,8 +742,8 @@ def size_class(rec: Dict[str, Any]) -> Tuple[str, Optional[str]]:
 def size_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any],
                catalog: List[Dict[str, str]]) -> Dict[str, Dict[str, Any]]:
     price = parse_amount(rec.get("meta") or {})
-    if price is None or price < ONE_EOK:
-        return judgment
+    if price is None or price < ONE_EOK or SZ_COMPETITIVE.search(full_text(rec)):
+        return judgment                                 # 중기간 경쟁제품 공고면 일반물품 항목(v14·v16)이 아님
     _, codes = dp_demand(rec, catalog)
     by_code = {r.get("세부품명번호"): r for r in catalog}
     for c in codes:                                    # 경쟁제품이면 일반물품 항목(v14·v16)이 아님
@@ -1248,6 +1253,9 @@ def parse_amount(meta: Dict[str, Any]) -> Optional[float]:
     return bud / 1.1 if bud is not None else None
 
 
+GATE_SW_HINT = re.compile(r"소프트웨어|정보\s*시스템|시스템\s*(?:구축|개발|고도화|유지)|홈페이지|플랫폼|앱\s|어플리케이션|SW|전산"
+                          r"|데이터베이스|DB\s*구축|유지\s*보수|프로그램")
+CATALOG_CACHE: List[Dict[str, str]] = []           # run()에서 채움 — 게이트가 직생 요구를 확인할 때 사용
 GATE_MODEL_HINT = re.compile(r"모델\s*명|제조사|제조\s*회사|상표|브랜드|[A-Za-z]{2,}[\s-]?\d{2,}|동등\s*(?:이상|품)")
 
 
@@ -1278,9 +1286,18 @@ def gate_closed(rec: Dict[str, Any]) -> Dict[str, str]:
             closed["v15"] = closed["v16"] = "1억~고시금액 구간 밖"
         if amt >= ONE_EOK * 1.1:                         # 1억 미만 항목
             closed["v17"] = closed["v18"] = "1억 이상"
-    # v15(소기업·소상공인만 제한)는 본문 참가자격에 기업규모 제한 문구가 있어야 성립 (dev 막힌 정답 양성 0)
-    if "v15" not in closed and size_class(rec)[0] == "none":
-        closed["v15"] = "본문 기업규모 제한 없음"
+    # 필요조건 게이트(항목 정의상 그 문구가 없으면 성립 불가, dev 막힌 정답 양성 모두 0)
+    kind = size_class(rec)[0]
+    if kind == "none":                                  # v15·v17: 기업규모 '제한'이 있어야 성립
+        closed.setdefault("v15", "본문 기업규모 제한 없음")
+        closed.setdefault("v17", "본문 기업규모 제한 없음")
+    ft = full_text(rec)
+    if "v9" not in closed and not GATE_MODEL_HINT.search(ft):
+        closed["v9"] = "모델명·제조사 단서 없음"
+    if not GATE_SW_HINT.search(ft):                     # v20: SW 사업 단서가 없으면 성립 불가
+        closed["v20"] = "SW 단서 없음"
+    if CATALOG_CACHE and dp_demand(rec, CATALOG_CACHE)[0] is not None:
+        closed["v10"] = "직접생산 요구 있음"            # v10: 직접생산 요구가 '없음'이 위반
     return closed
 
 
@@ -1404,6 +1421,7 @@ def run(input_path: str, out_path: str, runner_cls, limit: Optional[int], chunk:
     system_prompt = build_system_prompt(tbl)
     group_schemas = [restrict_schema(schema, g) for g in ITEM_GROUPS]
     catalog = load_catalog(data_dir) if (FACTS_MODE or CATALOG_RULES) else []
+    CATALOG_CACHE[:] = catalog
     facts_used = 0
     runner = runner_cls(schema, **runner_kw)
     log(f"모델 로드 {runner.load_seconds:.1f}s · GROUP_MODE={GROUP_MODE} · 임계값 {len(ITEM_THRESHOLDS)}개")
