@@ -1453,6 +1453,9 @@ def gate_closed(rec: Dict[str, Any]) -> Dict[str, str]:
         closed.setdefault("v17", "본문 기업규모 제한 없음")
     elif kind == "small" and not V17_SME_CERT.search(ft):
         closed.setdefault("v17", "소기업·소상공인만 허용")   # v17은 중기업까지 허용한 제한이어야 성립
+    if SZ_COMPETITIVE.search(ft) or (CATALOG_CACHE and dp_demand(rec, CATALOG_CACHE)[1] & {r.get("세부품명번호") for r in CATALOG_CACHE}):
+        closed.setdefault("v17", "경쟁제품(일반물품 아님)")
+        closed.setdefault("v15", "경쟁제품(v13 영역)")
     if kind == "sme" and not SZ_CERT_SMALL.search(ft):
         closed.setdefault("v15", "중소기업 허용")         # v15는 소기업·소상공인만 허용해야 성립 (dev 막힌 정답 양성 0)
     # v9 근거 조문(정부 입찰·계약 집행기준 제5조)은 '물품의 제조·구매입찰'을 대상으로 함 (dev 용역 양성 0/122)
