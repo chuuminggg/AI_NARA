@@ -798,7 +798,10 @@ def size_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any],
           and "수의" not in str((rec.get("meta") or {}).get("계약방법") or "")
           and not SZ_EXCEPTION.search(full_text(rec))):
         out["v16"] = {"위반여부": 1, "근거문구": ""}
-    return out                                          # v15(소기업만) 규칙은 dev 2/5/4로 모델보다 못해 쓰지 않음
+    elif ONE_EOK <= price < GOSI_AMOUNT and kind == "small" and not SZ_EXCEPTION.search(full_text(rec)):
+        # v15: 1억~고시금액 일반 물품·용역을 소기업·소상공인만으로 제한 (요구 확인서 기준, dev 2/1/4)
+        out["v15"] = {"위반여부": 1, "근거문구": quote or ""}
+    return out
 
 
 def small_price_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
