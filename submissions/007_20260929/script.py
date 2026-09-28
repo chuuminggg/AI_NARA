@@ -433,7 +433,8 @@ CAT_CAP = re.compile(r"추정가격\s*([\d,.]+)\s*억\s*원?\s*미만")
 DP_DEMAND = re.compile(r"직접\s*생산\s*확인\s*(?:증명서|서류|기준)?[^.\n]{0,40}?"
                        r"(?:소지|보유|제출|갖추|갖춘|있는\s*자|발급)")
 DP_SANCTION = re.compile(r"직접\s*생산\s*확인\s*기준을?\s*위반|직접생산\s*여부\s*확인\s*결과")
-SME_CLAUSE = re.compile(r"중소기업(?:자|기본법)?[^.\n]{0,60}?(?:확인서|제한|한정|참가|자격|로서|이어야)")
+SME_CLAUSE = re.compile(r"중\s*[·ㆍ・･․‧]?\s*소기업(?:자|기본법)?[^.\n]{0,60}?(?:확인서|제한|한정|참가|자격|로서|이어야)"
+                        r"|따른\s*중\s*[·ㆍ・･․‧]?\s*소기업자")
 
 
 def catalog_cap(row: Dict[str, str]) -> Optional[float]:
@@ -682,7 +683,8 @@ def qualification_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any]
             a = t.rfind("\n", 0, mm.start()) + 1
             b = t.find("\n", mm.end())
             line = t[a: b if b != -1 else len(t)]
-            if "v19" not in found and QR_BID.search(line):
+            near = t[max(a, mm.start() - 80): min(b if b != -1 else len(t), mm.end() + 80)]
+            if "v19" not in found and QR_BID.search(near):
                 found["v19"] = line.strip()[:480]
     # v21: 공동수급 구성원 최소 지분율을 5% 미만으로 정함 (dev 4/0/2, 0.07배). 5%는 dev 라벨이 갈려 제외
     ft = full_text(rec)
@@ -740,15 +742,15 @@ SZ_RESTRICT = re.compile(r"제한|한정|에\s*한함|에\s*한하여|만\s*(?:�
 SZ_EXCEPTION = re.compile(r"우선\s*조달\s*계약[^\n]{0,20}?예외|중소기업자\s*간\s*경쟁\s*입찰의\s*예외|제\s*2\s*조의\s*3")
 SZ_LAWNAME = re.compile(r"「[^」]*」|｢[^｣]*｣|『[^』]*』|\[[^\]]*\]|‘[^’]*’|“[^”]*”")
 SZ_RULENAME = re.compile(r"중소기업\s*범위\s*및\s*확인에\s*관한\s*규정"
-                         r"|중?\s*[·ㆍ・/]?\s*소기업\s*[·ㆍ・/]?\s*소상공인\s*확인서|중소기업\s*확인서")
+                         r"|중?\s*[·ㆍ・･․‧/]?\s*소기업\s*[·ㆍ・･․‧/]?\s*소상공인\s*확인서|중소기업\s*확인서")
 SZ_COMPETITIVE = re.compile(r"(?:중기간|중소기업자\s*간)\s*경쟁\s*제품")
-SZ_SME = re.compile(r"중소기업(?!자간)|중기업|중\s*[·ㆍ・/]\s*소")
+SZ_SME = re.compile(r"중소기업(?!자간)|중기업|중\s*[·ㆍ・･․‧/]\s*소")
 SZ_SMALL = re.compile(r"(?<!중)소기업|소상공인")
 
 
 # 요구 확인서가 가장 강한 신호: '소기업·소상공인 확인서' → 소기업만, '중·소기업·소상공인 확인서'·'중소기업 확인서' → 중소기업
-SZ_CERT_SMALL = re.compile(r"(?<![중·ㆍ・/\s])\s*소기업\s*[·ㆍ・,/]?\s*소상공인\s*(?:등\s*)?확인서|소기업자\s*[·ㆍ・,/]\s*소상공인")
-SZ_CERT_SME = re.compile(r"중\s*[·ㆍ・/]\s*소기업\s*[·ㆍ・/]?\s*소상공인\s*확인서|중소기업\s*(?:또는\s*소상공인\s*)?확인서")
+SZ_CERT_SMALL = re.compile(r"(?<![중·ㆍ・･․‧/\s])\s*소기업\s*[·ㆍ・･․‧,/]?\s*소상공인\s*(?:등\s*)?확인서|소기업자\s*[·ㆍ・･․‧,/]\s*소상공인")
+SZ_CERT_SME = re.compile(r"중\s*[·ㆍ・･․‧/]\s*소기업\s*[·ㆍ・･․‧/]?\s*소상공인\s*확인서|중소기업\s*(?:또는\s*소상공인\s*)?확인서")
 
 
 def size_class(rec: Dict[str, Any]) -> Tuple[str, Optional[str]]:
@@ -1303,8 +1305,17 @@ def parse_amount(meta: Dict[str, Any]) -> Optional[float]:
 
 GATE_SW_HINT = re.compile(r"소프트웨어|정보\s*시스템|시스템\s*(?:구축|개발|고도화|유지)|홈페이지|플랫폼|앱\s|어플리케이션|SW|전산"
                           r"|데이터베이스|DB\s*구축|유지\s*보수|프로그램")
+# v20은 소프트웨어진흥법상 SW사업에만 적용: SW사업자·SW진흥법·대기업 참여제한 등 SW사업 단서가 있어야 함
+# (dev 통과 25건·막힌 정답 양성 0, 무라벨 통과 8.9%)
+GATE_SW_BIZ = re.compile(r"소프트웨어\s*사업|소프트웨어\s*진흥법|소프트웨어\s*산업|SW\s*사업|중소\s*소프트웨어"
+                         r"|대기업[^\n]{0,30}참여\s*(?:를\s*)?제한|대기업인\s*소프트웨어|정보화\s*사업|컴퓨터\s*관련\s*서비스")
+# v17 게이트: 본문이 소기업·소상공인만 허용하면(적법 형태) 중기업 포함 표기가 따로 있을 때만 통과 (dev 막힌 정답 양성 0)
+V17_SME_CERT = re.compile(r"중소기업\s*[·ㆍ・･․‧,/]\s*소상공인\s*확인서|중\s*[·ㆍ・･․‧/]\s*소기업")
+# v10은 중기간 경쟁제품 입찰에만 성립: 고시 품명·번호, 직접생산·경쟁제품 언급, '지정 공고한' 조항호 중 하나가 있어야 함
+# (dev 통과 160→48건, 막힌 정답 양성 2/7 — 공고에 경쟁제품 단서가 전혀 없는 경우)
+GATE_COMP_HINT = re.compile(r"직접\s*생산|경쟁\s*제품|지정\s*[.·]?\s*(?:공고|고시)한")
 CATALOG_CACHE: List[Dict[str, str]] = []           # run()에서 채움 — 게이트가 직생 요구를 확인할 때 사용
-GATE_MODEL_HINT = re.compile(r"모델\s*명|제조사|제조\s*회사|상표|브랜드|[A-Za-z]{2,}[\s-]?\d{2,}|동등\s*(?:이상|품)")
+GATE_MODEL_HINT = re.compile(r"모델\s*명|제조사|제조\s*회사|상표|브랜드|(?<![A-Za-z])(?!ISO|KS|RJ)[A-Z]{2,}-?\d{2,}|동등\s*(?:이상|품)")
 
 
 def gate_closed(rec: Dict[str, Any]) -> Dict[str, str]:
@@ -1336,16 +1347,25 @@ def gate_closed(rec: Dict[str, Any]) -> Dict[str, str]:
             closed["v17"] = closed["v18"] = "1억 이상"
     # 필요조건 게이트(항목 정의상 그 문구가 없으면 성립 불가, dev 막힌 정답 양성 모두 0)
     kind = size_class(rec)[0]
+    ft = full_text(rec)
     if kind == "none":                                  # v15·v17: 기업규모 '제한'이 있어야 성립
         closed.setdefault("v15", "본문 기업규모 제한 없음")
         closed.setdefault("v17", "본문 기업규모 제한 없음")
-    ft = full_text(rec)
+    elif kind == "small" and not V17_SME_CERT.search(ft):
+        closed.setdefault("v17", "소기업·소상공인만 허용")   # v17은 중기업까지 허용한 제한이어야 성립
+    if kind == "sme" and not SZ_CERT_SMALL.search(ft):
+        closed.setdefault("v15", "중소기업 허용")         # v15는 소기업·소상공인만 허용해야 성립 (dev 막힌 정답 양성 0)
     if "v9" not in closed and not GATE_MODEL_HINT.search(ft):
         closed["v9"] = "모델명·제조사 단서 없음"
     if not GATE_SW_HINT.search(ft):                     # v20: SW 사업 단서가 없으면 성립 불가
         closed["v20"] = "SW 단서 없음"
+    elif not GATE_SW_BIZ.search(ft + str(m.get("면허업종제한목록") or "")):
+        closed["v20"] = "SW사업 단서 없음"
     if CATALOG_CACHE and dp_demand(rec, CATALOG_CACHE)[0] is not None:
         closed["v10"] = "직접생산 요구 있음"            # v10: 직접생산 요구가 '없음'이 위반
+    elif (CATALOG_CACHE and not GATE_COMP_HINT.search(ft + str(m.get("조항호내용") or ""))
+          and not catalog_matches(rec, CATALOG_CACHE)):
+        closed["v10"] = "경쟁제품 단서 없음"            # v10은 경쟁제품 입찰에만 성립
     return closed
 
 
