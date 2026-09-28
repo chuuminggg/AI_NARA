@@ -586,6 +586,9 @@ QR_PERF2 = re.compile(QR_PERF.pattern + r"|실적(?:이|을)?\s*[^\n]{0,25}?\d[\
 # dev v1 4/1/3, 무라벨 0.76배
 QR_V1B = re.compile(r"(?:\d+\s*(?:명|인|대|개소|곳)\s*이상|전국|모든)[^\n]{0,40}?"
                     r"(?:인력|시설|센터|장비|사무소|지사|차량|정비소)[^\n]{0,30}?(?:보유|갖춘|갖추|있는|확보)")
+# v1 확장2: "[기관(대학)]만 입찰 참여 가능", "…대학교, 국공립연구기관 가능", "특정 지역에 소재한 시설을 보유" (dev 4/1/3 → 6/1/1, 무라벨 0.97배)
+QR_V1C = re.compile(r"(?:대학(?:교)?|연구기관|산학협력단)[^\n]{0,40}?(?:가능|만\s*(?:입찰|참여|참가))\s*(?:합니다|함)?\.?\s*$", re.M)
+QR_V1D = re.compile(r"소재한\s*[^\n]{0,20}?(?:시설|센터|사업장)[^\n]{0,10}?(?:보유|갖춘|갖추)")
 QR_EVAL_CONTEXT = re.compile(r"평가|기재|인정|배점|가점|합산|규모")   # v2: 평가 기준 줄은 참가자격 제한이 아님
 QR_PLEDGE = re.compile(r"(?:물품\s*공급|기술\s*지원|공급)[^\n]{0,15}?(?:확약서|협약서|확인서)"
                        r"|(?:A\s*/\s*S|정품|제조사)[^\n]{0,15}?확약서")          # dev v19 3/2/3 → 5/2/1
@@ -647,7 +650,7 @@ def qualification_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any]
     # v1: 참가자격을 대학·산학협력단·연구기관·협회 회원 등 특정 기관으로 한정 (dev 2/0/5, 무라벨 0.23배)
     for d in rec["docs"]:
         t = d["text"]
-        for mm in list(QR_V1.finditer(t)) + list(QR_V1B.finditer(t)):
+        for mm in list(QR_V1.finditer(t)) + list(QR_V1B.finditer(t)) + list(QR_V1C.finditer(t)) + list(QR_V1D.finditer(t)):
             if "v1" not in found and qr_in_qual(t, mm.start()):
                 a = t.rfind("\n", 0, mm.start()) + 1
                 b = t.find("\n", mm.end())
