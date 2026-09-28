@@ -705,7 +705,10 @@ RULE_OVERRIDE_ITEMS = {"v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v11", "v
 #   v16: 1억 ≤ 추정가격 < 고시금액인데 기업규모 제한 문구가 없음(완전관측일 때만) (dev 5/7/1, 0.71배)
 # v15·v17·v18은 같은 방식으로 dev 오탐이 커서 쓰지 않습니다.
 SZ_RESTRICT = re.compile(r"제한|한정|에\s*한함|에\s*한하여|만\s*(?:참|입찰|가능)|이어야|로서|자격"
-                         r"|확인서\s*(?:를|을)?\s*(?:소지|보유|발급)")
+                         r"|확인서\s*(?:를|을)?\s*(?:소지|보유|발급)|갖춘|소지한|소지|대상으로|해당하는\s*(?:자|업체)")
+# 판로지원 예외(우선조달계약 예외) 명시 — 항목표 비고: 예외를 명시하면 기업규모 제한이 없어도 v16·v18 위반 아님
+# (dev v16 오탐 7→4, v18 10→4, 막힌 정답 양성 0)
+SZ_EXCEPTION = re.compile(r"우선\s*조달\s*계약[^\n]{0,20}?예외|중소기업자\s*간\s*경쟁\s*입찰의\s*예외|제\s*2\s*조의\s*3")
 SZ_LAWNAME = re.compile(r"「[^」]*」|｢[^｣]*｣|『[^』]*』|\[[^\]]*\]")
 SZ_RULENAME = re.compile(r"중소기업\s*범위\s*및\s*확인에\s*관한\s*규정"
                          r"|중?\s*[·ㆍ・/]?\s*소기업\s*[·ㆍ・/]?\s*소상공인\s*확인서|중소기업\s*확인서")
@@ -749,7 +752,8 @@ def size_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any],
     if price >= GOSI_AMOUNT and kind in ("sme", "small"):
         out["v14"] = {"위반여부": 1, "근거문구": quote or ""}
     elif (ONE_EOK <= price < GOSI_AMOUNT and kind == "none" and complete
-          and "수의" not in str((rec.get("meta") or {}).get("계약방법") or "")):
+          and "수의" not in str((rec.get("meta") or {}).get("계약방법") or "")
+          and not SZ_EXCEPTION.search(full_text(rec))):
         out["v16"] = {"위반여부": 1, "근거문구": ""}
     return out                                          # v15(소기업만) 규칙은 dev 2/5/4로 모델보다 못해 쓰지 않음
 
@@ -762,7 +766,8 @@ def small_price_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any]) 
         return judgment                                 # 수의계약은 적용이 불명확(운영진 답변) — dev 오탐 14/24가 수의계약
     kind, _ = size_class(rec)
     out = dict(judgment)
-    if kind == "none" and (rec.get("input_completeness") or {}).get("완전관측") is True:
+    if (kind == "none" and (rec.get("input_completeness") or {}).get("완전관측") is True
+            and not SZ_EXCEPTION.search(full_text(rec))):
         out["v18"] = {"위반여부": 1, "근거문구": ""}
     return out
 
