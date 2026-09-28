@@ -508,7 +508,7 @@ def catalog_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any],
 QUAL_RULES = True
 QR_PERF = re.compile(r"실적(?:을|이)?\s*(?:보유|있는|갖춘|충족)|(?:이상|초과)(?:인|의)?\s*실적|실적\s*증명서?\s*(?:보유|소지|제출)"
                   r"|수행\s*실적|준공\s*금?액[^\n]{0,40}이상|납품\s*실적")
-QR_REGION = re.compile(r"본점\s*소재지|주된\s*영업소|소재지를\s*[^\n]{0,60}(?:두고|둔)|관내에\s*(?:있는|소재)"
+QR_REGION = re.compile(r"본점\s*소재지|주된\s*(?:영업소|사무소)|소재지를\s*[^\n]{0,60}(?:두고|둔)|관내에\s*(?:있는|소재)"
                     r"|에\s*소재한\s*(?:업체|자)|지역\s*제한|(?:에|내에)\s*소재(?:한|하고|하는)")
 QR_NOT_Q = re.compile(r"배점|평가\s*항목|평가표|정량\s*평가|정성\s*평가|가점|심사\s*기준|평가\s*기준|제안서\s*평가|서식|별지|제출\s*서류|증빙\s*서류")
 QR_Q_HEAD = re.compile(r"참가\s*자격|자격\s*요건")
@@ -516,7 +516,7 @@ QR_WIDE = (r"[가-힣]{2}특별자치도|[가-힣]{2}특별자치시|[가-힣]{2
         r"|전라북도|전라남도|경상북도|경상남도|제주도")
 QR_QQ = r"[\s\"'“”‘’]*"
 QR_REGION_PAIR = re.compile(r"(" + QR_WIDE + r")" + QR_QQ + r"[^\n]{0,60}?(?:또는|,|·|및)" + QR_QQ + r"(" + QR_WIDE + r")")
-QR_REGION_ANCHOR = re.compile(r"본점\s*소재지|주된\s*영업소|소재지를\s*[^\n]{0,80}(?:두고|둔)|관할\s*구역\s*안에|지역\s*제한|소재지가")
+QR_REGION_ANCHOR = re.compile(r"본점\s*소재지|주된\s*(?:영업소|사무소)|소재지를\s*[^\n]{0,80}(?:두고|둔)|관할\s*구역\s*안에|지역\s*제한|소재지가")
 QR_INST = (r"국가기관|공공기관|정부투자기관|지방자치단체|지자체|공기업|준정부기관|정부기관|교육청|고등학교|대학교"
         r"|대학병원|종합병원|국공립|초등학교|중학교")
 QR_ORD = r"발주|시행|납품|공급|체결|수주"
@@ -602,6 +602,8 @@ QR_PLEDGE = re.compile(r"(?:물품\s*공급|기술\s*지원|공급)[^\n]{0,15}?(
                        r"|(?:A\s*/\s*S|정품|제조사)[^\n]{0,15}?확약서")          # dev v19 3/2/3 → 5/2/1
 QR_BID = re.compile(r"입\s*찰\s*(?:참가|서|시|등록)|투\s*찰|제출\s*마감|참가\s*신청|입찰\s*참가자는"
                     r"|입\s*찰\s*전|입찰에\s*참가|입찰\s*마감")
+# 계약 뒤 수행 의무 문장(주어가 사업수행자·계약상대자·수급인)은 참가자격이 아님
+QR_DUTY = re.compile(r"(?:사업\s*수행자|계약\s*상대자|수급인|용역\s*수행자|낙찰자)\s*[는은가이]")
 QR_V1 = re.compile(r"(고등교육법|산학협력단|대학(?:교)?|연구기관|협회\s*회원|정부출연)[^\n]{0,60}?"
                    r"(?:만\s*(?:참여|참가|입찰)|에\s*한하여|으로\s*한정|로\s*한정|참여\s*가능)")
 QR_SHARE = re.compile(r"(?:지분|출자\s*비율|분담\s*비율)[^\n]{0,40}?(\d{1,2}(?:\.\d+)?)\s*%")
@@ -617,6 +619,21 @@ def qr_money(text: str) -> List[float]:
         if v >= 1e6:
             vals.append(v)
     return vals
+
+
+# 수요기관이 기초자치단체이고 그 관내 소재로 제한 → 시·군·구 단위 제한
+QR_BASIC_ORG_IN = re.compile(r"\(기초자치단체\)[^\]]*\]\s*(?:내에|관내|내|안에)")
+
+
+def region_line(rec: Dict[str, Any]) -> str:
+    """원문에서 지역제한을 적은 첫 줄(없으면 빈 문자열)."""
+    ft = full_text(rec)
+    mm = QR_REGION_ANCHOR.search(ft)
+    if not mm:
+        return ""
+    a = ft.rfind("\n", 0, mm.start()) + 1
+    b = ft.find("\n", mm.end())
+    return ft[a: b if b != -1 else len(ft)].strip()[:480]
 
 
 def qr_region_clauses(rec: Dict[str, Any]) -> List[str]:
@@ -659,7 +676,8 @@ def qualification_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any]
     for d in rec["docs"]:
         t = d["text"]
         for mm in list(QR_V1.finditer(t)) + list(QR_V1B.finditer(t)) + list(QR_V1C.finditer(t)) + list(QR_V1D.finditer(t)):
-            if "v1" not in found and qr_in_qual(t, mm.start()):
+            if "v1" not in found and qr_in_qual(t, mm.start()) and not QR_DUTY.search(
+                    t[max(t.rfind("\n", 0, mm.start()) + 1, mm.start() - 60): mm.start()]):
                 a = t.rfind("\n", 0, mm.start()) + 1
                 b = t.find("\n", mm.end())
                 found["v1"] = t[a: b if b != -1 else len(t)].strip()[:480]
@@ -699,7 +717,8 @@ def qualification_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any]
     clauses = qr_region_clauses(rec)
     if clauses and price is not None and price >= limit:
         found["v5"] = clauses[0]
-    basic = [c for c in clauses if any("단위=기초" in t for t in QR_REGION_TOKEN.findall(c))]
+    basic = [c for c in clauses if any("단위=기초" in t for t in QR_REGION_TOKEN.findall(c))
+             or QR_BASIC_ORG_IN.search(c)]
     if not basic:                                       # '… [지역:…단위=기초…] 지역 업체' 형태
         for d in rec["docs"]:
             t = d["text"]
@@ -713,7 +732,8 @@ def qualification_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any]
     meta_basic = (str(m.get("지역제한여부")) == "Y" and "단위=기초" in str(m.get("제한지역코드목록") or "")
                   and "제한" in str(m.get("계약방법") or ""))
     if (basic or meta_basic) and price is not None and price < limit and "소액수의" not in str(m.get("낙찰방법") or ""):
-        found["v6"] = basic[0] if basic else ""
+        # 메타 경로는 원문 지역제한 줄을 근거로 둔다(빈 근거는 아래 반영 단계에서 버려짐)
+        found["v6"] = basic[0] if basic else (clauses[0] if clauses else region_line(rec))
     out = dict(judgment)
     for v, q in found.items():
         if q and out[v]["위반여부"] != 1:
@@ -752,11 +772,14 @@ SZ_SMALL = re.compile(r"(?<!중)소기업|소상공인")
 
 # 요구 확인서가 가장 강한 신호: '소기업·소상공인 확인서' → 소기업만, '중·소기업·소상공인 확인서'·'중소기업 확인서' → 중소기업
 SZ_CERT_SMALL = re.compile(r"(?<![중·ㆍ・･․‧/\s])\s*소기업\s*[·ㆍ・･․‧,/]?\s*소상공인\s*(?:등\s*)?확인서|소기업자\s*[·ㆍ・･․‧,/]\s*소상공인")
-SZ_CERT_SME = re.compile(r"중\s*[·ㆍ・･․‧/]\s*소기업\s*[·ㆍ・･․‧/]?\s*소상공인\s*확인서|중소기업\s*(?:또는\s*소상공인\s*)?확인서")
+SZ_CERT_SME = re.compile(r"중\s*[·ㆍ・･․‧/]\s*소기업\s*[·ㆍ・･․‧/]?\s*소상공인\s*확인서|중소기업\s*(?:(?:또는|[·ㆍ・･․‧,/])\s*소상공인\s*)?확인서")
+
+SZ_CERT_DEMAND = re.compile(r"\s*[>」』”’\x27\]〉》]*\s*(?:\([^()]{0,40}\)\s*)?[를을]?\s*(?:소지|보유|갖춘|발급\s*받은)")
 
 
 def size_class(rec: Dict[str, Any]) -> Tuple[str, Optional[str]]:
     kinds, quote = set(), None
+    demanded: Dict[str, str] = {}                      # '소지·보유'가 붙은 확인서(요구) — 유효기간 안내 등 언급보다 우선
     for d in rec["docs"]:
         t = d["text"]
         for lm in re.finditer(r"[^\n]+", t):
@@ -765,6 +788,13 @@ def size_class(rec: Dict[str, Any]) -> Tuple[str, Optional[str]]:
             if (cs or cm) and qr_in_qual(t, lm.start()):
                 kinds.add("sme" if cm else "small")
                 quote = quote or line.strip()[:480]
+                for kind, pat in (("small", SZ_CERT_SMALL), ("sme", SZ_CERT_SME)):
+                    for cm_ in pat.finditer(line):
+                        if SZ_CERT_DEMAND.match(line, cm_.end()):
+                            demanded.setdefault(kind, line.strip()[:480])
+    if len(demanded) == 1:
+        kind = next(iter(demanded))
+        return kind, demanded[kind]
     if kinds:
         return ("sme" if "sme" in kinds else "small"), quote
     return size_class_text(rec)
@@ -873,6 +903,8 @@ def v23_rule(rec: Dict[str, Any]) -> Optional[Tuple[bool, str]]:
             if V23_SKIP.search(w[:30]):
                 continue
             for dm in V23_DATE.finditer(w):
+                if dm.start() > 60 or V23_SKIP.search(w[:dm.start()]):
+                    break                                  # 설명회 날짜가 아니거나 일시를 따로 알림
                 y = int(dm.group(1)) if dm.group(1) else post.year
                 try:
                     b = _dt.date(y, int(dm.group(2)), int(dm.group(3)))
