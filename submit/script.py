@@ -920,6 +920,10 @@ def v23_rule(rec: Dict[str, Any]) -> Optional[Tuple[bool, str]]:
     return None
 
 
+V20_SW_LICENSE = re.compile(r"소프트웨어\s*사업자|\(1468\)")
+V20_BIG = re.compile(r"대\s*기업|중견\s*기업|상호\s*출자\s*제한|소프트웨어\s*진흥법[^\n]{0,20}제\s*48\s*조")
+
+
 # ----- v24 공고서↔나라장터 입력값 대조 (항목 비고의 네 축 중 계약방법·예산 구간, 지역제한, 업종) -----
 # 예산 금액 축은 부가세·산식 표기 때문에 오탐이 많아 쓰지 않습니다. 등록값이 익명화 토큰이면 비교하지 않습니다.
 # 등록이 제한 'N'인 방향은 보지 않습니다. dev 규칙 단독 4/1/4, 무라벨 발화율 dev 대비 0.3배.
@@ -991,6 +995,11 @@ def misc_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any],
     r23 = v23_rule(rec)
     if r23 and r23[0]:
         out["v23"] = {"위반여부": 1, "근거문구": r23[1]}
+    # v20(부재탐지): SW사업자 면허로 제한한 SW사업인데 대기업·상호출자제한기업 참여제한 문구가 없음
+    #   (중소 SW사업자 사업 참여 지원 지침 — 사업금액 구간별 대기업 참여제한 문구 필수). dev 4/2/1
+    if (V20_SW_LICENSE.search(str(m.get("면허업종제한목록") or "")) and not V20_BIG.search(ft)
+            and "v20" not in gate_closed(rec)):
+        out["v20"] = {"위반여부": 1, "근거문구": ""}
     q24 = v24_rule(rec)
     if q24:
         out["v24"] = {"위반여부": 1, "근거문구": q24}
