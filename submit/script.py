@@ -686,10 +686,12 @@ def qualification_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any]
             near = t[max(a, mm.start() - 80): min(b if b != -1 else len(t), mm.end() + 80)]
             if "v19" not in found and QR_BID.search(near):
                 found["v19"] = line.strip()[:480]
-    # v21: 공동수급 구성원 최소 지분율을 5% 미만으로 정함 (dev 4/0/2, 0.07배). 5%는 dev 라벨이 갈려 제외
+    # v21: 공동수급 구성원 최소 지분율을 계약법별 하한보다 낮게 정함 (dev 6/0/0)
+    #   지방: 지방자치단체 입찰 및 계약 집행기준 제6장 제2절 — 5% 이상 / 국가: 공동계약운용요령 — 공동이행 10% 이상
     ft = full_text(rec)
+    floor = 5.0 if "지방" in str(m.get("적용계약법") or "") else 10.0
     for mm in QR_SHARE.finditer(ft):
-        if float(mm.group(1)) < 5 and "공동" in ft[max(0, mm.start() - 200): mm.end()]:
+        if float(mm.group(1)) < floor and "공동" in ft[max(0, mm.start() - 200): mm.end()]:
             a = ft.rfind("\n", 0, mm.start()) + 1
             b = ft.find("\n", mm.end())
             found["v21"] = ft[a: b if b != -1 else len(ft)].strip()[:480]
@@ -726,7 +728,7 @@ def qualification_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any]
 # 대상 선정: 3차 서버 0.21과 비슷한 가상 모델(재현율 50%·오탐 15%, 게이트 적용)의 항목별 F1보다
 # 규칙 단독 dev F1이 높은 항목(17개). 나머지 7개(v9·v10·v15·v17·v20·v23·v24)는 모델 판정을 씁니다.
 RULE_OVERRIDE_ITEMS = {"v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v11", "v12", "v13", "v14",
-                       "v16", "v18", "v19", "v21", "v22", "v23"}
+                       "v16", "v18", "v19", "v21", "v22", "v23", "v24"}
 
 
 # ----- 공고 본문 참가자격의 기업규모 규칙 (v14·v16) -----
@@ -886,6 +888,54 @@ def v23_rule(rec: Dict[str, Any]) -> Optional[Tuple[bool, str]]:
     return None
 
 
+# ----- v24 공고서↔나라장터 입력값 대조 (항목 비고의 네 축 중 계약방법·예산 구간, 지역제한, 업종) -----
+# 예산 금액 축은 부가세·산식 표기 때문에 오탐이 많아 쓰지 않습니다. 등록값이 익명화 토큰이면 비교하지 않습니다.
+# 등록이 제한 'N'인 방향은 보지 않습니다. dev 규칙 단독 4/1/4, 무라벨 발화율 dev 대비 0.3배.
+V24_TAG = re.compile(r"\((일반경쟁|제한경쟁|지명경쟁)\s*[·ㆍ]\s*(\d+)\s*(억|천만)\s*원\s*미만\)")
+V24_UNIT = {"억": 100_000_000, "천만": 10_000_000}
+V24_RTAG = re.compile(r"지역\s*제한\s*\(([^)]*)\)")
+V24_WIDE = re.compile(QR_WIDE)
+V24_RENAMED = {"강원도": "강원특별자치도", "전라북도": "전북특별자치도", "제주도": "제주특별자치도"}
+V24_IND_DOC = re.compile(r"업\s*종\s*(?:코드|번호)?\s*[:：(]?\s*(\d{4})(?!\d)")
+
+
+def _v24_regions(text: str) -> set:
+    return {V24_RENAMED.get(x, x) for x in V24_WIDE.findall(text or "")}
+
+
+def v24_rule(rec: Dict[str, Any]) -> Optional[str]:
+    """공고 본문과 등록 메타가 어긋나는 첫 표기(원문 부분문자열). 없으면 None."""
+    m = rec.get("meta") or {}
+    ft = full_text(rec)
+    price = parse_amount(m)
+    for t in V24_TAG.finditer(ft):                      # 제목 태그의 계약방법·금액 구간
+        if t.group(1) != str(m.get("계약방법") or "") or (
+                price is not None and price >= int(t.group(2)) * V24_UNIT[t.group(3)]):
+            return t.group(0)
+    if m.get("지역제한여부") == "Y":
+        listed = str(m.get("제한지역코드목록") or "")
+        registered = _v24_regions(listed)
+        if listed and "[" not in listed and registered:
+            t = V24_RTAG.search(ft)
+            if t:
+                tagged = _v24_regions(t.group(1))
+                if tagged and tagged != registered:
+                    return t.group(0)
+            else:
+                for c in QR_REGION_ANCHOR.finditer(ft):
+                    if _v24_regions(ft[max(0, c.start() - 120): c.end() + 120]) - registered:
+                        a = ft.rfind("\n", 0, c.start()) + 1
+                        b = ft.find("\n", c.end())
+                        return ft[a: b if b != -1 else len(ft)].strip()[:480]
+    if m.get("업종제한여부") == "Y":
+        registered = set(re.findall(r"(?<!\d)(\d{4})(?!\d)", str(m.get("면허업종제한목록") or "")))
+        if registered:
+            for d in V24_IND_DOC.finditer(ft):
+                if d.group(1) not in registered:
+                    return d.group(0)
+    return None
+
+
 def misc_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any],
                catalog: List[Dict[str, str]]) -> Dict[str, Dict[str, Any]]:
     """v22: 협상계약에서 현장설명회 참석 업체로 참가 제한 (dev 1/0/4).
@@ -909,6 +959,9 @@ def misc_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any],
     r23 = v23_rule(rec)
     if r23 and r23[0]:
         out["v23"] = {"위반여부": 1, "근거문구": r23[1]}
+    q24 = v24_rule(rec)
+    if q24:
+        out["v24"] = {"위반여부": 1, "근거문구": q24}
     if "소액수의" not in str(m.get("낙찰방법") or ""):
         _, codes = dp_demand(rec, catalog)
         price = parse_amount(m)
@@ -1361,6 +1414,9 @@ def gate_closed(rec: Dict[str, Any]) -> Dict[str, str]:
         closed.setdefault("v17", "소기업·소상공인만 허용")   # v17은 중기업까지 허용한 제한이어야 성립
     if kind == "sme" and not SZ_CERT_SMALL.search(ft):
         closed.setdefault("v15", "중소기업 허용")         # v15는 소기업·소상공인만 허용해야 성립 (dev 막힌 정답 양성 0)
+    # v9 근거 조문(정부 입찰·계약 집행기준 제5조)은 '물품의 제조·구매입찰'을 대상으로 함 (dev 용역 양성 0/122)
+    if "v9" not in closed and not str(m.get("업무구분") or "물품").startswith("물품"):
+        closed["v9"] = "물품 입찰 아님"
     if "v9" not in closed and not GATE_MODEL_HINT.search(ft):
         closed["v9"] = "모델명·제조사 단서 없음"
     if not GATE_SW_HINT.search(ft):                     # v20: SW 사업 단서가 없으면 성립 불가
