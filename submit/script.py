@@ -586,6 +586,7 @@ QR_PERF2 = re.compile(QR_PERF.pattern + r"|실적(?:이|을)?\s*[^\n]{0,25}?\d[\
 # dev v1 4/1/3, 무라벨 0.76배
 QR_V1B = re.compile(r"(?:\d+\s*(?:명|인|대|개소|곳)\s*이상|전국|모든)[^\n]{0,40}?"
                     r"(?:인력|시설|센터|장비|사무소|지사|차량|정비소)[^\n]{0,30}?(?:보유|갖춘|갖추|있는|확보)")
+QR_EVAL_CONTEXT = re.compile(r"평가|기재|인정|배점|가점|합산|규모")   # v2: 평가 기준 줄은 참가자격 제한이 아님
 QR_PLEDGE = re.compile(r"(?:물품\s*공급|기술\s*지원|공급)[^\n]{0,15}?(?:확약서|협약서|확인서)"
                        r"|(?:A\s*/\s*S|정품|제조사)[^\n]{0,15}?확약서")          # dev v19 3/2/3 → 5/2/1
 QR_BID = re.compile(r"입\s*찰\s*(?:참가|서|시|등록)|투\s*찰|제출\s*마감|참가\s*신청|입찰\s*참가자는"
@@ -662,7 +663,7 @@ def qualification_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any]
                 a = t.rfind("\n", 0, mm.start()) + 1
                 b = t.find("\n", mm.end())
                 line = t[a: b if b != -1 else len(t)]
-                if "이상" in line and qr_money(line):
+                if "이상" in line and qr_money(line) and not QR_EVAL_CONTEXT.search(line):
                     found["v2"] = line.strip()[:480]
     # v19: 물품공급·기술지원 확약서를 입찰 단계(같은 줄에 입찰 참가·투찰·제출 마감)에 요구 (dev 3/2/3, 0.35배)
     for d in rec["docs"]:
@@ -805,7 +806,7 @@ QR_SITE_NEG = re.compile(r"허용되지|제외|접수하지|불가|자격|에\s*
 # 제출마감은 메타 개찰예정일자로 근사합니다. dev 4/3/1.
 V23_BRIEF = re.compile(r"(?:현장|사업|과업|제안\s*요청서?)\s*설명(?:회)?")
 V23_DATE = re.compile(r"(?:(20\d{2})\s*[.\-/년]\s*)?(\d{1,2})\s*[.\-/월]\s*(\d{1,2})\s*[.일]?")
-V23_SKIP = re.compile(r"없음|미실시|생략|하지\s*않")
+V23_SKIP = re.compile(r"없음|미실시|생략|하지\s*않|갈음|개별\s*(?:통보|안내)|추후")
 
 
 def _ymd(value: Any):
