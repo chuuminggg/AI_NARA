@@ -739,7 +739,27 @@ SZ_SME = re.compile(r"중소기업(?!자간)|중기업|중\s*[·ㆍ・/]\s*소")
 SZ_SMALL = re.compile(r"(?<!중)소기업|소상공인")
 
 
+# 요구 확인서가 가장 강한 신호: '소기업·소상공인 확인서' → 소기업만, '중·소기업·소상공인 확인서'·'중소기업 확인서' → 중소기업
+SZ_CERT_SMALL = re.compile(r"(?<![중·ㆍ・/\s])\s*소기업\s*[·ㆍ・,/]?\s*소상공인\s*(?:등\s*)?확인서|소기업자\s*[·ㆍ・,/]\s*소상공인")
+SZ_CERT_SME = re.compile(r"중\s*[·ㆍ・/]\s*소기업\s*[·ㆍ・/]?\s*소상공인\s*확인서|중소기업\s*(?:또는\s*소상공인\s*)?확인서")
+
+
 def size_class(rec: Dict[str, Any]) -> Tuple[str, Optional[str]]:
+    kinds, quote = set(), None
+    for d in rec["docs"]:
+        t = d["text"]
+        for lm in re.finditer(r"[^\n]+", t):
+            line = lm.group(0)
+            cs, cm = bool(SZ_CERT_SMALL.search(line)), bool(SZ_CERT_SME.search(line))
+            if (cs or cm) and qr_in_qual(t, lm.start()):
+                kinds.add("sme" if cm else "small")
+                quote = quote or line.strip()[:480]
+    if kinds:
+        return ("sme" if "sme" in kinds else "small"), quote
+    return size_class_text(rec)
+
+
+def size_class_text(rec: Dict[str, Any]) -> Tuple[str, Optional[str]]:
     """본문 참가자격의 허용 기업규모: 'sme'(중기업 포함) / 'small'(소기업·소상공인만) / 'none', 그리고 근거 줄."""
     kinds, quote = set(), None
     for d in rec["docs"]:
