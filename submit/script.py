@@ -460,6 +460,16 @@ def catalog_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any],
         return judgment
     quote, codes = dp_demand(rec, catalog)
     if quote is None or not codes:
+        # 직생 요구 품명이 없어도 공고가 '중기간 경쟁제품'이라 밝히거나 등록 조항호가 '지정 공고한 물품'이면
+        # 경쟁제품 입찰로 보고, 중소기업자 참가 조건이 없으면 v11 (dev v11 2/1/4 → 3/2/3)
+        m = rec.get("meta") or {}
+        clause = str(m.get("조항호내용") or "")
+        ft = full_text(rec)
+        if ((SZ_COMPETITIVE.search(ft) or ("지정" in clause and "공고한" in clause))
+                and judgment["v11"]["위반여부"] != 1 and not SME_CLAUSE.search(ft)):
+            out = dict(judgment)
+            out["v11"] = {"위반여부": 1, "근거문구": ""}
+            return out
         return judgment
     by_code = {r.get("세부품명번호"): r for r in catalog}
     price = parse_amount(rec.get("meta") or {})
