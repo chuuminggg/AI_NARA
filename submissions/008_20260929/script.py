@@ -711,8 +711,13 @@ def qr_region_clauses(rec: Dict[str, Any]) -> List[str]:
             if qr_in_qual(t, m.start()):
                 a = t.rfind("\n", 0, m.start()) + 1
                 b = t.find("\n", m.end())
+                if QR_REGION_COND.search(t[max(a, m.start() - 120): m.end() + 40]):
+                    continue                           # '지역제한경쟁입찰을 부치는 경우 …' 같은 유의서 일반 조항
                 out.append(t[a: b if b != -1 else len(t)].strip()[:480])
     return out
+
+
+QR_REGION_COND = re.compile(r"지역\s*제한\s*경쟁\s*입찰(?:을|에)?\s*(?:부치는|부칠|실시하는|하는)\s*경우")
 
 
 def qualification_rules(judgment: Dict[str, Dict[str, Any]], rec: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -1457,10 +1462,15 @@ def parse_amount(meta: Dict[str, Any]) -> Optional[float]:
                 return None
         return None
     est = num(meta.get("입찰추정가격"))
-    if est is not None:
+    if est is not None and est >= AMOUNT_MIN:
         return est
     bud = num(meta.get("배정예산금액"))
-    return bud / 1.1 if bud is not None else None
+    if bud is not None and bud >= AMOUNT_MIN:
+        return bud / 1.1
+    return None                                  # 1원·818원처럼 비정상 금액은 알 수 없음으로 둠
+
+
+AMOUNT_MIN = 1_000_000
 
 
 GATE_SW_HINT = re.compile(r"소프트웨어|정보\s*시스템|시스템\s*(?:구축|개발|고도화|유지)|홈페이지|플랫폼|앱\s|어플리케이션|SW|전산"
